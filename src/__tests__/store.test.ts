@@ -88,6 +88,50 @@ describe('canvas store — core mutations', () => {
     expect(store.findByRole('wordmark')).toHaveLength(2)
   })
 
+  it('selectArtboard sets the artboard selection and clears object selection', () => {
+    const ab = store.addArtboard({})
+    const obj = store.addObject({ type: 'path', artboardId: ab.id })
+    store.selectObjects([obj.id])
+    store.selectArtboard(ab.id)
+    expect(store.selectedArtboardId).toBe(ab.id)
+    expect(store.selectedArtboard!.id).toBe(ab.id)
+    expect(store.selectedIds).toEqual([])
+  })
+
+  it('selecting an object clears artboard selection (mutually exclusive)', () => {
+    const ab = store.addArtboard({})
+    const obj = store.addObject({ type: 'path', artboardId: ab.id })
+    store.selectArtboard(ab.id)
+    store.selectObjects([obj.id])
+    expect(store.selectedArtboardId).toBeNull()
+    expect(store.selectedIds).toEqual([obj.id])
+  })
+
+  it('selectArtboard ignores unknown ids and clearSelection clears both', () => {
+    const ab = store.addArtboard({})
+    store.selectArtboard('nope')
+    expect(store.selectedArtboardId).toBeNull()
+    store.selectArtboard(ab.id)
+    store.clearSelection()
+    expect(store.selectedArtboardId).toBeNull()
+  })
+
+  it('removeArtboard clears its selection', () => {
+    const ab = store.addArtboard({})
+    store.selectArtboard(ab.id)
+    store.removeArtboard(ab.id)
+    expect(store.selectedArtboardId).toBeNull()
+  })
+
+  it('updateArtboard changes size but not id/objectIds', () => {
+    const ab = store.addArtboard({ width: 400, height: 300 })
+    store.updateArtboard(ab.id, { width: 600, height: 500, id: 'nope' } as any)
+    const after = store.getArtboard(ab.id)!
+    expect(after.width).toBe(600)
+    expect(after.height).toBe(500)
+    expect(after.id).toBe(ab.id)
+  })
+
   it('style helpers update fields', () => {
     store.addArtboard({})
     const p = store.addObject({ type: 'path' })
@@ -134,6 +178,99 @@ describe('canvas store — undo + activity log', () => {
     store.endActivityGroup({ status: 'done' })
     expect(store.activityLog[0]!.status).toBe('done')
     expect(store.currentGroup).toBeNull()
+  })
+})
+
+describe('canvas store — resize + rotate', () => {
+  let store: ReturnType<typeof useCanvasStore>
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useCanvasStore()
+    store.addArtboard({})
+  })
+
+  it('defaults baseWidth/baseHeight to the initial size', () => {
+    const o = store.addObject({ type: 'path', width: 120, height: 80 }) as any
+    expect(o.baseWidth).toBe(120)
+    expect(o.baseHeight).toBe(80)
+  })
+
+  it('respects explicitly provided base dimensions', () => {
+    const o = store.addObject({ type: 'image', width: 300, height: 200, baseWidth: 1200, baseHeight: 800 }) as any
+    expect(o.baseWidth).toBe(1200)
+    expect(o.baseHeight).toBe(800)
+  })
+
+  it('resizeObject updates x/y/width/height and clamps to >= 1', () => {
+    const o = store.addObject({ type: 'path', x: 0, y: 0, width: 100, height: 100 })
+    store.resizeObject(o.id, { x: 10, y: 20, width: 250, height: 0 })
+    const after = store.getObject(o.id)! as any
+    expect(after.x).toBe(10)
+    expect(after.y).toBe(20)
+    expect(after.width).toBe(250)
+    expect(after.height).toBe(1)
+    // Base dims are untouched by a resize.
+    expect(after.baseWidth).toBe(100)
+    expect(after.baseHeight).toBe(100)
+  })
+
+  it('rotateObject normalizes the angle into 0..360', () => {
+    const o = store.addObject({ type: 'text' })
+    expect((store.rotateObject(o.id, 45) as any).rotation).toBe(45)
+    expect((store.rotateObject(o.id, 380) as any).rotation).toBe(20)
+    expect((store.rotateObject(o.id, -90) as any).rotation).toBe(270)
+  })
+})
+
+describe('canvas store — tool state', () => {
+  let store: ReturnType<typeof useCanvasStore>
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useCanvasStore()
+  })
+
+  it('defaults to the select tool', () => {
+    expect(store.activeTool).toBe('select')
+    expect(store.pendingImage).toBeNull()
+  })
+
+  it('setActiveTool updates the active tool', () => {
+    store.setActiveTool('rect')
+    expect(store.activeTool).toBe('rect')
+    store.setActiveTool('text')
+    expect(store.activeTool).toBe('text')
+  })
+
+  it('setActiveTool falls back to select for unknown ids', () => {
+    store.setActiveTool('bogus' as any)
+    expect(store.activeTool).toBe('select')
+  })
+
+  it('setPendingImage stores and clears the staged image', () => {
+    store.setPendingImage({ href: 'data:img', alt: 'x', width: 10, height: 20 })
+    expect(store.pendingImage).toMatchObject({ href: 'data:img', width: 10, height: 20 })
+    store.setPendingImage(null)
+    expect(store.pendingImage).toBeNull()
+  })
+
+  it('setPendingImage ignores payloads without an href', () => {
+    store.setPendingImage({ href: '' })
+    expect(store.pendingImage).toBeNull()
+  })
+
+  it('switching away from the image tool discards the pending image', () => {
+    store.setActiveTool('image')
+    store.setPendingImage({ href: 'data:img' })
+    store.setActiveTool('select')
+    expect(store.pendingImage).toBeNull()
+  })
+
+  it('resetToolState returns to select with no pending image', () => {
+    store.setActiveTool('image')
+    store.setPendingImage({ href: 'data:img' })
+    store.resetToolState()
+    expect(store.activeTool).toBe('select')
+    expect(store.pendingImage).toBeNull()
   })
 })
 

@@ -22,6 +22,20 @@ export type SemanticRole = (typeof SEMANTIC_ROLES)[number]
 export const OBJECT_TYPES = ['path', 'text', 'image'] as const
 export type ObjectType = (typeof OBJECT_TYPES)[number]
 
+// User-facing canvas tools (the floating tool sidebar). 'select' is the idle
+// default; the others arm a creation mode until the user switches back.
+export const TOOL_IDS = ['select', 'text', 'rect', 'ellipse', 'line', 'image'] as const
+export type ToolId = (typeof TOOL_IDS)[number]
+
+// A staged image chosen (uploaded or picked from Pexels) but not yet placed.
+export interface PendingImage {
+  href: string
+  sourceUrl?: string
+  alt?: string
+  width?: number
+  height?: number
+}
+
 // Intentionally small, polished typography set for the demo.
 export const FONT_FAMILIES = [
   { label: 'Inter', value: 'Inter' },
@@ -60,6 +74,11 @@ interface BaseObject {
   y: number
   width: number
   height: number
+  // Intrinsic (unscaled) dimensions the geometry was authored at. The renderer
+  // derives a scale factor from width/height over these, so resizing never has
+  // to rewrite path `d` or an image's intrinsic size. Defaults to width/height.
+  baseWidth: number
+  baseHeight: number
   rotation: number
   opacity: number
 }
@@ -118,6 +137,7 @@ interface SerializedState {
   objects: Record<string, CanvasObject>
   objectOrder: string[]
   selectedIds: string[]
+  selectedArtboardId: string | null
 }
 
 export interface CanvasState {
@@ -125,10 +145,13 @@ export interface CanvasState {
   objects: Record<string, CanvasObject>
   objectOrder: string[]
   selectedIds: string[]
+  selectedArtboardId: string | null
   viewport: { x: number; y: number; zoom: number }
   history: HistoryEntry[]
   activityLog: ActivityGroup[]
   currentGroup: string | null
+  activeTool: ToolId
+  pendingImage: PendingImage | null
   _idCounter: number
 }
 
@@ -157,6 +180,8 @@ const OBJECT_DEFAULTS = {
   y: 0,
   width: 100,
   height: 100,
+  baseWidth: 100,
+  baseHeight: 100,
   rotation: 0,
   opacity: 1,
   semanticRole: 'none' as SemanticRole,
@@ -193,10 +218,13 @@ export const useCanvasStore = defineStore('canvas', {
     objects: {},
     objectOrder: [],
     selectedIds: [],
+    selectedArtboardId: null,
     viewport: { x: 0, y: 0, zoom: 1 },
     history: [],
     activityLog: [],
     currentGroup: null,
+    activeTool: 'select',
+    pendingImage: null,
     _idCounter: 0,
   }),
 
@@ -218,6 +246,10 @@ export const useCanvasStore = defineStore('canvas', {
     },
     hasSelection(state): boolean {
       return state.selectedIds.length > 0
+    },
+    selectedArtboard(state): Artboard | null {
+      if (!state.selectedArtboardId) return null
+      return state.artboards.find((a) => a.id === state.selectedArtboardId) || null
     },
   },
 
@@ -304,6 +336,7 @@ export const useCanvasStore = defineStore('canvas', {
       if (!artboard) return false
       ;[...artboard.objectIds].forEach((objId) => this.removeObject(objId))
       this.artboards.splice(idx, 1)
+      if (this.selectedArtboardId === id) this.selectedArtboardId = null
       return true
     },
 
@@ -326,6 +359,11 @@ export const useCanvasStore = defineStore('canvas', {
         type,
         artboardId,
       } as CanvasObject
+
+      // Base (intrinsic) dimensions anchor the resize scale. Unless the caller
+      // supplied them, they equal the initial width/height so scale starts at 1.
+      if (payload.baseWidth === undefined) obj.baseWidth = obj.width
+      if (payload.baseHeight === undefined) obj.baseHeight = obj.height
 
       this.objects[id] = obj
       this.objectOrder.push(id)
@@ -441,6 +479,27 @@ export const useCanvasStore = defineStore('canvas', {
       return this.updateObject(id, patch)
     },
 
+    // Resize any object: sets position and/or dimensions. Dimensions are the
+    // displayed size; the renderer derives a scale from width/baseWidth so the
+    // underlying geometry (path d / image intrinsic size) is never rewritten.
+    resizeObject(
+      id: string,
+      { x, y, width, height }: { x?: number; y?: number; width?: number; height?: number } = {},
+    ): CanvasObject | null {
+      const patch: Record<string, number> = {}
+      if (typeof x === 'number') patch.x = x
+      if (typeof y === 'number') patch.y = y
+      if (typeof width === 'number') patch.width = Math.max(1, width)
+      if (typeof height === 'number') patch.height = Math.max(1, height)
+      return this.updateObject(id, patch)
+    },
+
+    // Rotate an object to an absolute angle in degrees (normalized to 0..360).
+    rotateObject(id: string, degrees: number): CanvasObject | null {
+      const norm = ((degrees % 360) + 360) % 360
+      return this.updateObject(id, { rotation: norm })
+    },
+
     // ---- Style helpers -----------------------------------------------------
     setFill(id: string, fill: string): CanvasObject | null {
       return this.updateObject(id, { fill })
@@ -517,10 +576,40 @@ export const useCanvasStore = defineStore('canvas', {
     selectObjects(ids: string[] | string = []): string[] {
       const arr = Array.isArray(ids) ? ids : [ids]
       this.selectedIds = arr.filter((id) => !!this.objects[id])
+      // Object and artboard selection are mutually exclusive.
+      if (this.selectedIds.length) this.selectedArtboardId = null
       return this.selectedIds
+    },
+    selectArtboard(id: string | null): string | null {
+      if (id && this.getArtboard(id)) {
+        this.selectedArtboardId = id
+        // Selecting an artboard clears any object selection.
+        this.selectedIds = []
+      } else {
+        this.selectedArtboardId = null
+      }
+      return this.selectedArtboardId
     },
     clearSelection(): void {
       this.selectedIds = []
+      this.selectedArtboardId = null
+    },
+
+    // ---- Tool state (floating tool sidebar) --------------------------------
+    setActiveTool(tool: ToolId): ToolId {
+      this.activeTool = TOOL_IDS.includes(tool) ? tool : 'select'
+      // Leaving the image tool discards any staged image so it can't leak into
+      // a later placement with a different tool.
+      if (this.activeTool !== 'image') this.pendingImage = null
+      return this.activeTool
+    },
+    setPendingImage(payload: PendingImage | null): PendingImage | null {
+      this.pendingImage = payload && payload.href ? { ...payload } : null
+      return this.pendingImage
+    },
+    resetToolState(): void {
+      this.activeTool = 'select'
+      this.pendingImage = null
     },
 
     // ---- Snapshot / Undo ---------------------------------------------------
@@ -530,6 +619,7 @@ export const useCanvasStore = defineStore('canvas', {
         objects: JSON.parse(JSON.stringify(this.objects)),
         objectOrder: [...this.objectOrder],
         selectedIds: [...this.selectedIds],
+        selectedArtboardId: this.selectedArtboardId,
       }
     },
 
@@ -555,6 +645,8 @@ export const useCanvasStore = defineStore('canvas', {
       this.objects = JSON.parse(JSON.stringify(state.objects))
       this.objectOrder = [...state.objectOrder]
       this.selectedIds = (state.selectedIds || []).filter((id) => !!this.objects[id])
+      const abId = state.selectedArtboardId || null
+      this.selectedArtboardId = abId && this.getArtboard(abId) ? abId : null
     },
 
     canUndo(): boolean {

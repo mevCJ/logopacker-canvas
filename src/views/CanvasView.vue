@@ -1,32 +1,67 @@
 <template>
   <div class="canvas-page">
-    <Toolbar @fit-view="fitView" />
+    <Toolbar :activity-open="showActivity" @fit-view="fitView" @toggle-activity="showActivity = !showActivity" />
     <div class="canvas-body">
       <CanvasStage ref="stage" class="canvas-stage-host" />
+      <ToolSidebar @open-image-picker="onOpenImagePicker" />
+      <ImageToolPopover v-if="imagePicker.open" :anchor="imagePicker.anchor" @close="imagePicker.open = false" />
       <PropertyPanel />
-      <AgentActivityLog />
+      <Transition name="activity-slide">
+        <AgentActivityLog v-if="showActivity" />
+      </Transition>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useCanvasStore } from '@/stores/canvas'
 import { seedNova } from '@/services/canvas/novaSeed'
 import { registerCanvasTools } from '@/services/canvas/tools'
 import { buildImageTextTools } from '@/services/canvas/imageTextTools'
 import CanvasStage from '@/components/canvas/CanvasStage.vue'
 import Toolbar from '@/components/canvas/Toolbar.vue'
+import ToolSidebar from '@/components/canvas/ToolSidebar.vue'
+import ImageToolPopover from '@/components/canvas/ImageToolPopover.vue'
 import PropertyPanel from '@/components/canvas/PropertyPanel.vue'
 import AgentActivityLog from '@/components/canvas/AgentActivityLog.vue'
 
 const store = useCanvasStore()
 const stage = ref<{ fitViewBox: () => void } | null>(null)
+const showActivity = ref(false)
 let unregisterTools: (() => void) | null = null
+
+const imagePicker = reactive<{ open: boolean; anchor: { left: number; top: number } | null }>({
+  open: false,
+  anchor: null,
+})
 
 function fitView() {
   stage.value?.fitViewBox()
 }
+
+// Open the image picker anchored just to the right of the image tool button.
+function onOpenImagePicker(el: HTMLElement | null) {
+  const bodyRect = el?.closest('.canvas-body')?.getBoundingClientRect()
+  const btnRect = el?.getBoundingClientRect()
+  if (btnRect && bodyRect) {
+    imagePicker.anchor = {
+      left: btnRect.right - bodyRect.left + 8,
+      top: btnRect.top - bodyRect.top,
+    }
+  } else {
+    imagePicker.anchor = { left: 72, top: 120 }
+  }
+  imagePicker.open = true
+}
+
+// Close the picker when the image tool is deselected.
+watch(
+  () => store.activeTool,
+  (t) => {
+    if (t !== 'image') imagePicker.open = false
+  },
+)
 
 onMounted(() => {
   // Seed the NOVA primary logo (imports + tags src/assets/logoipsum.svg).
@@ -42,6 +77,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (unregisterTools) unregisterTools()
   unregisterTools = null
+  store.resetToolState()
 })
 </script>
 
@@ -60,6 +96,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: flex;
   flex-direction: row;
+  position: relative;
 }
 .canvas-stage-host {
   flex: 1;
@@ -68,5 +105,14 @@ onBeforeUnmount(() => {
   background-color: #ececed;
   background-image: radial-gradient(circle, rgba(0, 0, 0, 0.06) 1px, transparent 1px);
   background-size: 22px 22px;
+}
+.activity-slide-enter-active,
+.activity-slide-leave-active {
+  transition: margin-right 0.2s ease;
+  overflow: hidden;
+}
+.activity-slide-enter-from,
+.activity-slide-leave-to {
+  margin-right: -300px;
 }
 </style>

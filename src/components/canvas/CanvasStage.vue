@@ -2,14 +2,26 @@
   <div
     ref="mount"
     class="canvas-stage"
-    :class="{ panning: isPanning }"
+    :class="[{ panning: isPanning }, `tool-${activeTool}`]"
     @wheel.prevent="onWheel"
     @mousedown="onMouseDown"
-  ></div>
+  >
+    <textarea
+      v-if="inlineEdit"
+      ref="inlineInput"
+      class="inline-text-editor"
+      :style="inlineStyle"
+      v-model="inlineEdit.value"
+      @mousedown.stop
+      @wheel.stop
+      @blur="commitInlineEdit"
+      @keydown="onInlineKeydown"
+    ></textarea>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useCanvasStore } from '@/stores/canvas'
 import {
@@ -18,14 +30,21 @@ import {
   zoomViewBox,
   panViewBox,
   clampZoom,
+  normalizeDragBox,
+  resolveArtboardAtPoint,
+  mergeMarqueeSelection,
+  buildShapePayload,
+  canvasPointToScreenRect,
   type Box,
   type RenderObject,
 } from '@/services/canvas/svgEngine'
+import { fitImageSize } from '@/services/canvas/userTools'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const store = useCanvasStore()
-const { artboards, objects, objectOrder, selectedIds } = storeToRefs(store)
+const { artboards, objects, objectOrder, selectedIds, selectedArtboardId, activeTool } =
+  storeToRefs(store)
 
 const mount = ref<HTMLElement | null>(null)
 let renderer: CanvasRenderer | null = null
@@ -33,6 +52,100 @@ let baseBounds: Box = { x: 0, y: 0, width: 1000, height: 700 }
 
 const isPanning = ref(false)
 let panStart: { clientX: number; clientY: number; box: Box; moved: boolean } | null = null
+
+// Held-space forces panning regardless of the active tool.
+const spacePressed = ref(false)
+
+// Drag interaction state for the marquee (select) and shape tools. Points are
+// in canvas coordinates.
+type DragKind = 'marquee' | 'shape'
+let toolDrag: {
+  kind: DragKind
+  start: { x: number; y: number }
+  current: { x: number; y: number }
+  additive: boolean
+  moved: boolean
+} | null = null
+
+const SHAPE_TOOLS = ['rect', 'ellipse', 'line'] as const
+type ShapeTool = (typeof SHAPE_TOOLS)[number]
+function isShapeTool(t: string): t is ShapeTool {
+  return (SHAPE_TOOLS as readonly string[]).includes(t)
+}
+
+// Inline text editing overlay state.
+const inlineInput = ref<HTMLTextAreaElement | null>(null)
+const inlineEdit = ref<{ id: string; value: string } | null>(null)
+const inlineStyle = ref<Record<string, string>>({})
+
+function computeInlineStyle(id: string) {
+  const obj = store.getObject(id)
+  if (!obj || obj.type !== 'text' || !renderer || !mount.value) return
+  const artboard = obj.artboardId ? store.getArtboard(obj.artboardId) : null
+  const canvasPoint = { x: (artboard?.x ?? 0) + obj.x, y: (artboard?.y ?? 0) + obj.y }
+  const rect = mount.value.getBoundingClientRect()
+  const { left, top, scale } = canvasPointToScreenRect(canvasPoint, renderer.getViewBox(), rect)
+  const fontSize = (obj.fontSize || 24) * scale
+  inlineStyle.value = {
+    left: `${left - rect.left}px`,
+    top: `${top - rect.top}px`,
+    fontFamily: obj.fontFamily || 'Inter',
+    fontSize: `${fontSize}px`,
+    fontWeight: String(obj.fontWeight || 400),
+    color: obj.fill || '#211A43',
+    lineHeight: '1.1',
+  }
+}
+
+function startInlineEdit(id: string) {
+  const obj = store.getObject(id)
+  if (!obj || obj.type !== 'text') return
+  inlineEdit.value = { id, value: obj.text || '' }
+  computeInlineStyle(id)
+  nextTick(() => {
+    inlineInput.value?.focus()
+  })
+}
+
+function commitInlineEdit() {
+  const edit = inlineEdit.value
+  inlineEdit.value = null
+  if (!edit) return
+  const value = edit.value.trim()
+  const obj = store.getObject(edit.id)
+  if (!obj) return
+  if (!value) {
+    // Discard empty text objects (and the snapshot noise is acceptable).
+    store.removeObject(edit.id)
+  } else if (obj.type === 'text' && obj.text !== edit.value) {
+    store.updateObject(edit.id, { text: edit.value })
+  }
+}
+
+function cancelInlineEdit() {
+  const edit = inlineEdit.value
+  inlineEdit.value = null
+  if (!edit) return
+  const obj = store.getObject(edit.id)
+  // A freshly-placed, still-empty text object is removed on cancel.
+  if (obj && obj.type === 'text' && !(obj.text || '').trim() && !edit.value.trim()) {
+    store.removeObject(edit.id)
+  }
+}
+
+function onInlineKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelInlineEdit()
+    inlineInput.value?.blur()
+    return
+  }
+  // Enter commits; Shift+Enter inserts a newline.
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    commitInlineEdit()
+  }
+}
 
 function snapshot() {
   return {
@@ -45,13 +158,32 @@ function snapshot() {
 function rerender() {
   if (!renderer) return
   renderer.render(snapshot())
-  renderer.setSelection(store.selectedIds)
-  renderer.setResizable(store.selectedIds, store.objects as any)
+  renderer.setSelection(store.selectedIds, store.selectedObjects as any)
+  renderer.setArtboardSelection(store.selectedArtboardId)
 }
 
-function onObjectResized(id: string, { width, height }: { width: number; height: number }) {
+function onObjectResized(
+  id: string,
+  { x, y, width, height }: { x: number; y: number; width: number; height: number },
+) {
+  const obj = store.getObject(id)
+  if (!obj) return
   store.snapshot('Resize')
-  store.positionImage(id, { width, height })
+  if (obj.type === 'text') {
+    // Text scales its font size with the box height (keeps glyphs crisp rather
+    // than transform-stretching), then stores the new box.
+    const prevH = obj.height || 1
+    const ratio = prevH > 0 ? height / prevH : 1
+    const nextFont = Math.max(1, Math.round((obj.fontSize || 24) * ratio))
+    store.updateObject(id, { x, y, width, height, fontSize: nextFont })
+  } else {
+    store.resizeObject(id, { x, y, width, height })
+  }
+}
+
+function onObjectRotated(id: string, degrees: number) {
+  store.snapshot('Rotate')
+  store.rotateObject(id, degrees)
 }
 
 function fitViewBox() {
@@ -63,6 +195,10 @@ function fitViewBox() {
 // --- Interaction: object selection wiring ---------------------------------
 function wireObject(obj: RenderObject, el: any) {
   el.node.addEventListener('mousedown', (e: MouseEvent) => {
+    // Only the select tool (and not while space-panning) selects objects on
+    // click. With a creation tool active, let the event bubble to the stage so
+    // the tool can draw/place over existing objects.
+    if (store.activeTool !== 'select' || spacePressed.value) return
     e.stopPropagation()
     const additive = e.shiftKey
     if (additive) {
@@ -76,6 +212,35 @@ function wireObject(obj: RenderObject, el: any) {
   })
 }
 
+// --- Interaction: artboard selection via its name label -------------------
+function wireArtboard(
+  artboard: { id: string },
+  els: { group: any; label: any },
+) {
+  els.label.node.addEventListener('mousedown', (e: MouseEvent) => {
+    e.stopPropagation()
+    store.selectArtboard(artboard.id)
+  })
+}
+
+function onArtboardResized(
+  id: string,
+  box: { x: number; y: number; width: number; height: number },
+) {
+  const ab = store.getArtboard(id)
+  if (!ab) return
+  if (ab.width === box.width && ab.height === box.height && ab.x === box.x && ab.y === box.y) {
+    return
+  }
+  store.snapshot('Resize artboard')
+  store.updateArtboard(id, {
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    width: Math.round(box.width),
+    height: Math.round(box.height),
+  })
+}
+
 // --- Interaction: zoom (wheel) --------------------------------------------
 function onWheel(e: WheelEvent) {
   if (!renderer) return
@@ -86,10 +251,31 @@ function onWheel(e: WheelEvent) {
   renderer.setViewBox(box)
 }
 
-// --- Interaction: pan (drag empty space) + empty-click deselect -----------
+// --- Interaction: empty-space mousedown dispatches by active tool ---------
+// Space-held always pans. Otherwise: select → marquee/deselect; shapes → draw;
+// text/image are handled on click (no drag) in onMouseUp.
 function onMouseDown(e: MouseEvent) {
   if (!renderer) return
   if (e.button !== 0) return
+
+  const tool = store.activeTool
+  const wantPan = spacePressed.value || tool === 'image' || tool === 'text'
+
+  if (!wantPan && (tool === 'select' || isShapeTool(tool))) {
+    const p = renderer.screenToCanvas(e.clientX, e.clientY)
+    toolDrag = {
+      kind: tool === 'select' ? 'marquee' : 'shape',
+      start: p,
+      current: p,
+      additive: e.shiftKey,
+      moved: false,
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return
+  }
+
+  // Pan (default, or space-forced).
   panStart = {
     clientX: e.clientX,
     clientY: e.clientY,
@@ -101,7 +287,32 @@ function onMouseDown(e: MouseEvent) {
 }
 
 function onMouseMove(e: MouseEvent) {
-  if (!panStart || !renderer) return
+  if (!renderer) return
+
+  if (toolDrag) {
+    toolDrag.current = renderer.screenToCanvas(e.clientX, e.clientY)
+    const box = normalizeDragBox(toolDrag.start, toolDrag.current)
+    if (box.width > 1 || box.height > 1) toolDrag.moved = true
+    if (toolDrag.kind === 'marquee') {
+      renderer.showMarquee(box)
+    } else {
+      const type = store.activeTool as ShapeTool
+      // Lines use raw start→current so they can go in any direction.
+      if (type === 'line') {
+        renderer.showShapePreview('line', {
+          x: toolDrag.start.x,
+          y: toolDrag.start.y,
+          width: toolDrag.current.x - toolDrag.start.x,
+          height: toolDrag.current.y - toolDrag.start.y,
+        })
+      } else {
+        renderer.showShapePreview(type, box)
+      }
+    }
+    return
+  }
+
+  if (!panStart) return
   const rect = (renderer.draw.node as SVGSVGElement).getBoundingClientRect()
   const box = panStart.box
   const scaleX = box.width / rect.width
@@ -115,17 +326,113 @@ function onMouseMove(e: MouseEvent) {
   renderer.setViewBox(panViewBox(box, dx, dy))
 }
 
-function onMouseUp() {
+function onMouseUp(e: MouseEvent) {
+  window.removeEventListener('mousemove', onMouseMove)
+  window.removeEventListener('mouseup', onMouseUp)
+
+  if (toolDrag && renderer) {
+    const drag = toolDrag
+    toolDrag = null
+    if (drag.kind === 'marquee') {
+      renderer.hideMarquee()
+      if (drag.moved) {
+        const box = normalizeDragBox(drag.start, drag.current)
+        const hits = renderer.hitTestBox(box)
+        store.selectObjects(mergeMarqueeSelection(store.selectedIds, hits, drag.additive))
+      } else {
+        // A click with no drag clears the selection (unless additive).
+        if (!drag.additive) store.clearSelection()
+      }
+    } else {
+      renderer.hideShapePreview()
+      if (drag.moved) commitShape(store.activeTool as ShapeTool, drag.start, drag.current)
+    }
+    isPanning.value = false
+    return
+  }
+
   if (panStart && !panStart.moved) {
-    store.clearSelection()
+    // A plain click on empty space.
+    handleEmptyClick(e)
   }
   isPanning.value = false
   panStart = null
-  window.removeEventListener('mousemove', onMouseMove)
-  window.removeEventListener('mouseup', onMouseUp)
+}
+
+// Empty-space click behavior for the tools handled on click (text/image) and
+// the deselect fallback.
+function handleEmptyClick(e: MouseEvent) {
+  const tool = store.activeTool
+  if (tool === 'text') {
+    placeText(e.clientX, e.clientY)
+    return
+  }
+  if (tool === 'image') {
+    placeImage(e.clientX, e.clientY)
+    return
+  }
+  store.clearSelection()
+}
+
+// --- Shape tool: commit a drawn shape to the store ------------------------
+function commitShape(type: ShapeTool, start: { x: number; y: number }, current: { x: number; y: number }) {
+  const artboard = resolveArtboardAtPoint(store.artboards, start)
+  const payload = buildShapePayload(type, start, current, artboard)
+  if (!payload) return
+  store.snapshot('Add shape')
+  const obj = store.addObject({ ...payload, artboardId: artboard?.id ?? null })
+  store.selectObjects([obj.id])
+  // Tool stays armed for placing multiple.
+}
+
+// --- Text tool: place a text object and open the inline editor ------------
+function placeText(clientX: number, clientY: number) {
+  if (!renderer) return
+  const p = renderer.screenToCanvas(clientX, clientY)
+  const artboard = resolveArtboardAtPoint(store.artboards, p)
+  store.snapshot('Add text')
+  const obj = store.addObject({
+    type: 'text',
+    text: '',
+    x: p.x - (artboard?.x ?? 0),
+    y: p.y - (artboard?.y ?? 0),
+    artboardId: artboard?.id ?? null,
+    semanticRole: 'bodyText',
+  })
+  store.selectObjects([obj.id])
+  startInlineEdit(obj.id)
+}
+
+// --- Image tool: place the staged image -----------------------------------
+function placeImage(clientX: number, clientY: number) {
+  if (!renderer) return
+  const pending = store.pendingImage
+  if (!pending) return
+  const p = renderer.screenToCanvas(clientX, clientY)
+  const artboard = resolveArtboardAtPoint(store.artboards, p)
+  store.snapshot('Add image')
+  const size = fitImageSize(
+    { width: pending.width || 300, height: pending.height || 200 },
+    artboard?.width ? artboard.width * 0.9 : 300,
+    artboard?.height ? artboard.height * 0.9 : 300,
+  )
+  const obj = store.addImage({
+    href: pending.href,
+    sourceUrl: pending.sourceUrl,
+    alt: pending.alt,
+    width: size.width,
+    height: size.height,
+    x: p.x - (artboard?.x ?? 0),
+    y: p.y - (artboard?.y ?? 0),
+    artboardId: artboard?.id ?? null,
+  })
+  store.selectObjects([obj.id])
+  // Tool stays armed; pendingImage kept for easy multiple placement.
 }
 
 function onObjectDragEnd(id: string, { dx, dy }: { dx: number; dy: number }) {
+  // Only the select tool moves objects; creation tools ignore object drags.
+  if (store.activeTool !== 'select') return
   const obj = store.getObject(id)
   if (!obj) return
   store.snapshot('Move')
@@ -137,6 +444,19 @@ function onKeyDown(e: KeyboardEvent) {
   const target = e.target as HTMLElement | null
   const tag = (target && target.tagName) || ''
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || target?.isContentEditable) return
+
+  if (e.key === ' ' || e.code === 'Space') {
+    spacePressed.value = true
+    // Don't scroll the page; don't preventDefault globally to keep other keys.
+    return
+  }
+
+  // Escape returns to the Select tool (and closes any transient state).
+  if (e.key === 'Escape' && store.activeTool !== 'select') {
+    e.preventDefault()
+    store.setActiveTool('select')
+    return
+  }
 
   if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
     if (store.canUndo()) {
@@ -159,21 +479,30 @@ function onKeyDown(e: KeyboardEvent) {
   }
 }
 
+function onKeyUp(e: KeyboardEvent) {
+  if (e.key === ' ' || e.code === 'Space') spacePressed.value = false
+}
+
 onMounted(() => {
   if (!mount.value) return
   renderer = new CanvasRenderer(mount.value)
   renderer.onObjectMounted = wireObject
   renderer.onObjectDragEnd = onObjectDragEnd
   renderer.onObjectResized = onObjectResized
+  renderer.onObjectRotated = onObjectRotated
+  renderer.onArtboardMounted = wireArtboard
+  renderer.onArtboardResized = onArtboardResized
   rerender()
   fitViewBox()
   window.addEventListener('keydown', onKeyDown)
+  window.addEventListener('keyup', onKeyUp)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
   window.removeEventListener('keydown', onKeyDown)
+  window.removeEventListener('keyup', onKeyUp)
   if (renderer) renderer.destroy()
   renderer = null
 })
@@ -190,17 +519,39 @@ watch(
   selectedIds,
   () => {
     if (renderer) {
-      renderer.setSelection(store.selectedIds)
-      renderer.setResizable(store.selectedIds, store.objects as any)
+      renderer.setSelection(store.selectedIds, store.selectedObjects as any)
     }
   },
   { deep: true },
 )
 
+watch(selectedArtboardId, () => {
+  if (renderer) renderer.setArtboardSelection(store.selectedArtboardId)
+})
+
 watch(
   artboards,
   () => {
     fitViewBox()
+  },
+  { deep: true },
+)
+
+// Clean up transient tool state whenever the active tool changes.
+watch(activeTool, () => {
+  if (inlineEdit.value) commitInlineEdit()
+  if (renderer) {
+    renderer.hideMarquee()
+    renderer.hideShapePreview()
+  }
+  toolDrag = null
+})
+
+// Keep the inline editor aligned while its target text object exists.
+watch(
+  selectedIds,
+  () => {
+    if (inlineEdit.value) computeInlineStyle(inlineEdit.value.id)
   },
   { deep: true },
 )
@@ -214,9 +565,39 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
   height: 100%;
   overflow: hidden;
   cursor: grab;
+  position: relative;
+}
+/* Select tool uses a pointer; space-drag panning still shows the grab hand. */
+.canvas-stage.tool-select {
+  cursor: default;
 }
 .canvas-stage.panning {
   cursor: grabbing;
+}
+/* Creation tools use a crosshair; select keeps the grab/move affordance. */
+.canvas-stage.tool-rect,
+.canvas-stage.tool-ellipse,
+.canvas-stage.tool-line,
+.canvas-stage.tool-text {
+  cursor: crosshair;
+}
+.canvas-stage.tool-image {
+  cursor: copy;
+}
+.inline-text-editor {
+  position: absolute;
+  z-index: 30;
+  margin: 0;
+  padding: 0;
+  border: 1px dashed #2563eb;
+  outline: none;
+  background: rgba(255, 255, 255, 0.85);
+  resize: none;
+  overflow: hidden;
+  min-width: 40px;
+  min-height: 1em;
+  white-space: pre;
+  transform-origin: top left;
 }
 :deep(.canvas-object) {
   cursor: pointer;
@@ -226,7 +607,10 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
 }
 :deep(.artboard-label) {
   user-select: none;
-  pointer-events: none;
+  cursor: pointer;
+}
+:deep(.artboard-label.is-selected) {
+  fill: #2563eb;
 }
 /* Selection is visualized via a bounding-box overlay drawn by the renderer. */
 </style>

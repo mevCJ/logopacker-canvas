@@ -17,6 +17,15 @@
       </button>
       <span class="tb-sep" />
       <span class="tb-hint">{{ selectionLabel }}</span>
+      <span class="tb-sep" />
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn-active': activityOpen }"
+        :title="activityOpen ? 'Hide agent activity' : 'Show agent activity'"
+        @click="emit('toggle-activity')"
+      >
+        Agent activity
+      </button>
     </div>
   </div>
 </template>
@@ -26,7 +35,9 @@ import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useCanvasStore } from '@/stores/canvas'
 
-const emit = defineEmits<{ (e: 'fit-view'): void }>()
+const emit = defineEmits<{ (e: 'fit-view'): void; (e: 'toggle-activity'): void }>()
+
+defineProps<{ activityOpen?: boolean }>()
 
 const store = useCanvasStore()
 const { selectedIds, history } = storeToRefs(store)
@@ -109,6 +120,14 @@ function remove() {
 .tb-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+.tb-btn-active {
+  background: #211a43;
+  border-color: #211a43;
+  color: #fff;
+}
+.tb-btn-active:hover:not(:disabled) {
+  background: #2d2456;
 }
 .tb-sep {
   width: 1px;

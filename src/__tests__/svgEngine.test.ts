@@ -11,6 +11,23 @@ import {
   zoomViewBox,
   panViewBox,
   clampZoom,
+  resizeArtboardBox,
+  rectPathData,
+  ellipsePathData,
+  linePathData,
+  normalizeDragBox,
+  boxIntersects,
+  resolveArtboardAtPoint,
+  mergeMarqueeSelection,
+  buildShapePayload,
+  canvasPointToScreenRect,
+  rotatePoint,
+  boxCenter,
+  handlePositions,
+  resizeBoxFromHandle,
+  rotationFromPointer,
+  objectTransform,
+  invertResizeBox,
 } from '@/services/canvas/svgEngine'
 
 describe('svgEngine — pure helpers', () => {
@@ -53,7 +70,9 @@ describe('svgEngine — pure helpers', () => {
     expect(t['text-anchor']).toBe('middle')
     const i = imageAttrs({ id: 'y', type: 'image', href: 'x.png', width: 200, height: 100 })
     expect(i.href).toBe('x.png')
-    expect(i.preserveAspectRatio).toBe('xMidYMid slice')
+    // Images stretch to fill the (transform-scaled) box; aspect lock is opt-in
+    // via Shift during resize, so preserveAspectRatio is 'none'.
+    expect(i.preserveAspectRatio).toBe('none')
   })
 
   it('computes document bounds union with padding', () => {
@@ -76,5 +95,237 @@ describe('svgEngine — pure helpers', () => {
     expect(panViewBox(box, 10, 20)).toEqual({ x: -10, y: -20, width: 100, height: 100 })
     const base = { x: 0, y: 0, width: 1000, height: 1000 }
     expect(clampZoom({ x: 0, y: 0, width: 10, height: 10 }, base, 0.15, 8).width).toBeCloseTo(125, 5)
+  })
+
+  it('resizes an artboard by dragging an edge, anchoring the opposite side', () => {
+    const box = { x: 100, y: 100, width: 400, height: 300 }
+    // East/south edges only grow width/height; origin unchanged.
+    expect(resizeArtboardBox(box, 'e', 50, 0)).toEqual({ x: 100, y: 100, width: 450, height: 300 })
+    expect(resizeArtboardBox(box, 's', 0, 40)).toEqual({ x: 100, y: 100, width: 400, height: 340 })
+    // West/north edges move the origin so the opposite edge stays put.
+    expect(resizeArtboardBox(box, 'w', 30, 0)).toEqual({ x: 130, y: 100, width: 370, height: 300 })
+    expect(resizeArtboardBox(box, 'n', 0, 20)).toEqual({ x: 100, y: 120, width: 400, height: 280 })
+    // Minimum size is enforced and keeps the anchored edge fixed.
+    const shrunk = resizeArtboardBox(box, 'w', 1000, 0, 20)
+    expect(shrunk.width).toBe(20)
+    expect(shrunk.x + shrunk.width).toBe(500) // right edge (100 + 400) preserved
+  })
+})
+
+describe('svgEngine — shape + tool geometry helpers', () => {
+  it('builds rectangle path data closed around the origin', () => {
+    expect(rectPathData(100, 50)).toBe('M0 0 H100 V50 H0 Z')
+    // Negative sizes are clamped to 0.
+    expect(rectPathData(-10, 20)).toBe('M0 0 H0 V20 H0 Z')
+  })
+
+  it('builds ellipse path data using two arcs', () => {
+    const d = ellipsePathData(100, 60)
+    expect(d.startsWith('M0 30')).toBe(true)
+    expect(d).toContain('A50 30')
+    expect(d.endsWith('Z')).toBe(true)
+  })
+
+  it('builds line path data between two points', () => {
+    expect(linePathData(0, 0, 40, 10)).toBe('M0 0 L40 10')
+  })
+
+  it('normalizeDragBox handles all four drag directions', () => {
+    const a = normalizeDragBox({ x: 10, y: 10 }, { x: 40, y: 30 })
+    expect(a).toEqual({ x: 10, y: 10, width: 30, height: 20 })
+    const b = normalizeDragBox({ x: 40, y: 30 }, { x: 10, y: 10 })
+    expect(b).toEqual({ x: 10, y: 10, width: 30, height: 20 })
+    const c = normalizeDragBox({ x: 40, y: 10 }, { x: 10, y: 30 })
+    expect(c).toEqual({ x: 10, y: 10, width: 30, height: 20 })
+    const d = normalizeDragBox({ x: 10, y: 30 }, { x: 40, y: 10 })
+    expect(d).toEqual({ x: 10, y: 10, width: 30, height: 20 })
+  })
+
+  it('boxIntersects detects overlap and separation', () => {
+    const base = { x: 0, y: 0, width: 100, height: 100 }
+    expect(boxIntersects(base, { x: 50, y: 50, width: 100, height: 100 })).toBe(true)
+    expect(boxIntersects(base, { x: 200, y: 0, width: 10, height: 10 })).toBe(false)
+    // Edge-touching only (no area overlap) is not an intersection.
+    expect(boxIntersects(base, { x: 100, y: 0, width: 10, height: 10 })).toBe(false)
+  })
+
+  it('resolveArtboardAtPoint returns the artboard under the point', () => {
+    const a = { id: 'a', x: 0, y: 0, width: 100, height: 100 }
+    const b = { id: 'b', x: 200, y: 0, width: 100, height: 100 }
+    expect(resolveArtboardAtPoint([a, b], { x: 50, y: 50 })!.id).toBe('a')
+    expect(resolveArtboardAtPoint([a, b], { x: 250, y: 50 })!.id).toBe('b')
+  })
+
+  it('resolveArtboardAtPoint falls back to the first artboard when over none', () => {
+    const a = { id: 'a', x: 0, y: 0, width: 100, height: 100 }
+    const b = { id: 'b', x: 200, y: 0, width: 100, height: 100 }
+    expect(resolveArtboardAtPoint([a, b], { x: 999, y: 999 })!.id).toBe('a')
+    expect(resolveArtboardAtPoint([], { x: 0, y: 0 })).toBeNull()
+    expect(resolveArtboardAtPoint(undefined, { x: 0, y: 0 })).toBeNull()
+  })
+
+  it('resolveArtboardAtPoint prefers the last (topmost) overlapping artboard', () => {
+    const a = { id: 'a', x: 0, y: 0, width: 100, height: 100 }
+    const b = { id: 'b', x: 50, y: 50, width: 100, height: 100 }
+    expect(resolveArtboardAtPoint([a, b], { x: 75, y: 75 })!.id).toBe('b')
+  })
+
+  it('mergeMarqueeSelection replaces when not additive', () => {
+    expect(mergeMarqueeSelection(['a', 'b'], ['c', 'd'], false)).toEqual(['c', 'd'])
+    // De-duplicates hits.
+    expect(mergeMarqueeSelection([], ['c', 'c', 'd'], false)).toEqual(['c', 'd'])
+  })
+
+  it('mergeMarqueeSelection unions when additive', () => {
+    expect(mergeMarqueeSelection(['a', 'b'], ['b', 'c'], true)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('buildShapePayload builds a rect in artboard-local coordinates', () => {
+    const p = buildShapePayload('rect', { x: 120, y: 130 }, { x: 220, y: 190 }, { x: 100, y: 100 })!
+    expect(p.type).toBe('path')
+    expect(p.d).toBe('M0 0 H100 V60 H0 Z')
+    expect(p).toMatchObject({ x: 20, y: 30, width: 100, height: 60, fill: '#211A43', stroke: 'none' })
+  })
+
+  it('buildShapePayload builds an ellipse path', () => {
+    const p = buildShapePayload('ellipse', { x: 0, y: 0 }, { x: 100, y: 60 }, null)!
+    expect(p.d).toContain('A50 30')
+    expect(p).toMatchObject({ width: 100, height: 60 })
+  })
+
+  it('buildShapePayload builds a line with stroke and no fill', () => {
+    const p = buildShapePayload('line', { x: 110, y: 110 }, { x: 150, y: 130 }, { x: 100, y: 100 })!
+    expect(p.fill).toBe('none')
+    expect(p.stroke).toBe('#211A43')
+    expect(p.strokeWidth).toBe(2)
+    // Local origin normalized; d starts at the top-left corner of the bbox.
+    expect(p.x).toBe(10)
+    expect(p.y).toBe(10)
+    expect(p.d).toBe('M0 0 L40 20')
+  })
+
+  it('buildShapePayload rejects degenerate drags', () => {
+    expect(buildShapePayload('rect', { x: 10, y: 10 }, { x: 10, y: 10 }, null)).toBeNull()
+    expect(buildShapePayload('line', { x: 10, y: 10 }, { x: 10, y: 10 }, null)).toBeNull()
+  })
+
+  it('canvasPointToScreenRect maps canvas coords to host-relative screen coords', () => {
+    const r = canvasPointToScreenRect(
+      { x: 50, y: 50 },
+      { x: 0, y: 0, width: 100, height: 100 },
+      { left: 10, top: 20, width: 200, height: 200 },
+    )
+    // scale = 200/100 = 2; left = 10 + 50*2 = 110; top = 20 + 50*2 = 120
+    expect(r.scale).toBe(2)
+    expect(r.left).toBe(110)
+    expect(r.top).toBe(120)
+  })
+})
+
+describe('svgEngine — resize + rotation geometry', () => {
+  const box = { x: 100, y: 100, width: 200, height: 100 }
+
+  it('rotatePoint rotates about a center', () => {
+    const p = rotatePoint({ x: 0, y: 0 }, { x: 10, y: 0 }, 90)
+    expect(Math.round(p.x)).toBe(0)
+    expect(Math.round(p.y)).toBe(10)
+  })
+
+  it('boxCenter returns the geometric center', () => {
+    expect(boxCenter(box)).toEqual({ x: 200, y: 150 })
+  })
+
+  it('handlePositions places 8 handles plus rotate above the top-middle', () => {
+    const h = handlePositions(box, 24)
+    expect(h.nw).toEqual({ x: 100, y: 100 })
+    expect(h.se).toEqual({ x: 300, y: 200 })
+    expect(h.n).toEqual({ x: 200, y: 100 })
+    expect(h.rotate).toEqual({ x: 200, y: 76 })
+  })
+
+  it('resizeBoxFromHandle (unrotated) grows from the east edge, anchoring west', () => {
+    const out = resizeBoxFromHandle(box, 'e', 50, 0, 0, false)
+    expect(out.x).toBe(100) // west edge anchored
+    expect(Math.round(out.width)).toBe(250)
+    expect(out.height).toBe(100)
+  })
+
+  it('resizeBoxFromHandle (unrotated) drags the nw corner, anchoring se', () => {
+    const out = resizeBoxFromHandle(box, 'nw', -20, -10, 0, false)
+    // se corner (300,200) stays fixed.
+    expect(Math.round(out.x + out.width)).toBe(300)
+    expect(Math.round(out.y + out.height)).toBe(200)
+    expect(Math.round(out.width)).toBe(220)
+    expect(Math.round(out.height)).toBe(110)
+  })
+
+  it('resizeBoxFromHandle keeps aspect ratio on corners when requested', () => {
+    const out = resizeBoxFromHandle(box, 'se', 100, 0, 0, true)
+    expect(out.width / out.height).toBeCloseTo(box.width / box.height, 5)
+  })
+
+  it('resizeBoxFromHandle enforces a minimum size', () => {
+    const out = resizeBoxFromHandle(box, 'e', -1000, 0, 0, false, 4)
+    expect(out.width).toBe(4)
+  })
+
+  it('resizeBoxFromHandle respects rotation by resizing along local axes', () => {
+    // Rotated 90°, dragging the east handle east should change local width and
+    // keep the box centered consistently; the result stays finite and >= min.
+    const out = resizeBoxFromHandle(box, 'e', 0, 50, 90, false)
+    expect(Number.isFinite(out.width)).toBe(true)
+    expect(Number.isFinite(out.height)).toBe(true)
+    expect(out.width).toBeGreaterThan(0)
+  })
+
+  it('rotationFromPointer measures 0 at north, 90 at east', () => {
+    const c = { x: 0, y: 0 }
+    expect(Math.round(rotationFromPointer(c, { x: 0, y: -10 }))).toBe(0)
+    expect(Math.round(rotationFromPointer(c, { x: 10, y: 0 }))).toBe(90)
+    expect(Math.round(rotationFromPointer(c, { x: 0, y: 10 }))).toBe(180)
+    expect(Math.round(rotationFromPointer(c, { x: -10, y: 0 }))).toBe(270)
+  })
+
+  it('invertResizeBox round-trips origin+size when box is unchanged', () => {
+    const start = { x: 100, y: 100, width: 200, height: 80 }
+    const out = invertResizeBox({ x: 90, y: 95 }, { width: 100, height: 100 }, start, { ...start })
+    expect(out).toEqual({ x: 90, y: 95, width: 100, height: 100 })
+  })
+
+  it('invertResizeBox scales size and keeps geometry aligned under an offset box', () => {
+    // Object origin (10,10) but its visual bbox starts at (60,30) — a path whose
+    // d is offset from the origin, with stored size 100x100 that differs from
+    // the visual box. Double the box width; the stored size and the origin
+    // offset both scale so the shape stays under the outline.
+    const startBox = { x: 60, y: 30, width: 100, height: 40 }
+    const newBox = { x: 60, y: 30, width: 200, height: 40 } // grew east, width x2
+    const out = invertResizeBox({ x: 10, y: 10 }, { width: 100, height: 100 }, startBox, newBox)
+    expect(out.width).toBe(200) // 100 * 2
+    expect(out.height).toBe(100) // unchanged
+    // origin offset from box-left was (10-60)=-50; scaled x2 => -100; new x = 60-100 = -40
+    expect(out.x).toBe(-40)
+    expect(out.y).toBe(10)
+  })
+
+  it('invertResizeBox clamps size to a minimum of 1', () => {
+    const start = { x: 0, y: 0, width: 100, height: 100 }
+    const out = invertResizeBox({ x: 0, y: 0 }, { width: 100, height: 100 }, start, { x: 0, y: 0, width: 0, height: 0 })
+    expect(out.width).toBe(1)
+    expect(out.height).toBe(1)
+  })
+
+  it('objectTransform composes translate, rotate (center), and scale', () => {
+    expect(objectTransform(10, 20, 100, 50)).toBe('translate(10 20)')
+    expect(objectTransform(10, 20, 100, 50, 30)).toBe('translate(10 20) rotate(30 50 25)')
+    expect(objectTransform(10, 20, 100, 50, 0, 2, 3)).toBe('translate(10 20) scale(2 3)')
+    expect(objectTransform(0, 0, 200, 100, 45, 2, 2)).toBe('translate(0 0) rotate(45 100 50) scale(2 2)')
+  })
+
+  it('objectTransform rotates about an explicit geometry center when given', () => {
+    // Path whose geometry center (100,40) differs from the nominal box center
+    // (50,25): rotation must pivot on the geometry center, not the box center.
+    expect(objectTransform(10, 20, 100, 50, 30, 1, 1, 100, 40)).toBe(
+      'translate(10 20) rotate(30 100 40)',
+    )
   })
 })

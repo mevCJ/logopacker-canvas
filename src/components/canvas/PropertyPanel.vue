@@ -88,18 +88,28 @@
 
       <!-- Image properties -->
       <template v-else-if="selected.type === 'image'">
-        <section class="pp-section pp-row-2">
-          <div>
-            <label class="pp-label">Width</label>
-            <input type="number" min="1" class="pp-number" :value="Math.round(selected.width)" @input="update({ width: num($event) })" />
-          </div>
-          <div>
-            <label class="pp-label">Height</label>
-            <input type="number" min="1" class="pp-number" :value="Math.round(selected.height)" @input="update({ height: num($event) })" />
-          </div>
-        </section>
         <p v-if="selected.alt" class="pp-alt">{{ selected.alt }}</p>
       </template>
+
+      <!-- Transform (shared): size + rotation -->
+      <section class="pp-section pp-row-2">
+        <div>
+          <label class="pp-label">Width</label>
+          <input type="number" min="1" class="pp-number" :value="Math.round(selected.width)" @input="setWidth(num($event))" />
+        </div>
+        <div>
+          <label class="pp-label">Height</label>
+          <input type="number" min="1" class="pp-number" :value="Math.round(selected.height)" @input="setHeight(num($event))" />
+        </div>
+      </section>
+
+      <section class="pp-section">
+        <label class="pp-label">Rotation <span class="pp-value">{{ Math.round(selected.rotation || 0) }}°</span></label>
+        <div class="pp-color-row">
+          <input type="range" min="0" max="360" step="1" class="pp-range" :value="selected.rotation || 0" @input="setRotation(num($event))" />
+          <input type="number" min="0" max="360" class="pp-number pp-rot-num" :value="Math.round(selected.rotation || 0)" @input="setRotation(num($event))" />
+        </div>
+      </section>
 
       <!-- Opacity (shared) -->
       <section class="pp-section">
@@ -168,6 +178,28 @@ function setStrokeWidth(v: number) {
 function setOpacity(v: number) {
   if (!selected.value) return
   store.setOpacity(selected.value.id, v)
+}
+function setWidth(v: number) {
+  const o = selected.value
+  if (!o || !v || v < 1) return
+  store.resizeObject(o.id, { width: v })
+}
+function setHeight(v: number) {
+  const o = selected.value
+  if (!o || !v || v < 1) return
+  if (o.type === 'text') {
+    // Match the canvas handle behavior: text scales its font with its height.
+    const prevH = o.height || 1
+    const ratio = v / prevH
+    const nextFont = Math.max(1, Math.round((o.fontSize || 24) * ratio))
+    store.updateObject(o.id, { height: v, fontSize: nextFont })
+  } else {
+    store.resizeObject(o.id, { height: v })
+  }
+}
+function setRotation(v: number) {
+  if (!selected.value) return
+  store.rotateObject(selected.value.id, v)
 }
 
 function normalizeColor(c: unknown): string {
@@ -270,6 +302,10 @@ function normalizeColor(c: unknown): string {
 }
 .pp-range {
   width: 100%;
+}
+.pp-rot-num {
+  width: 64px;
+  flex-shrink: 0;
 }
 .pp-align {
   display: flex;
