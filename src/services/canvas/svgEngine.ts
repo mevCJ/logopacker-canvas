@@ -1635,13 +1635,12 @@ export class CanvasRenderer {
     // Ghost: a translucent clone that follows the cursor during the drag. The
     // real element stays put until the user drops, at which point we commit the
     // final delta to the store.
+    // A container group holding a translucent clone of every element being
+    // dragged: the whole selection when the grabbed object is part of it, else
+    // just that one. Each clone keeps its own transform (which, for text and
+    // paths, carries its position); translating the container moves them all,
+    // so a single group transform tracks the cursor for every element type.
     let ghost: SvgEl | null = null
-    // The clone keeps the original's transform (which, for text, carries its
-    // position). Moving the ghost by writing x/y attributes therefore breaks for
-    // text (its position lives in the transform, so x has no effect while y
-    // does). Instead we prepend a translate by the drag delta, which tracks the
-    // cursor on both axes for every element type.
-    let ghostBaseTransform = ''
 
     const clearGhost = () => {
       if (ghost) {
@@ -1659,14 +1658,20 @@ export class CanvasRenderer {
       startBox = (e.detail as { box: { x: number; y: number } }).box
       clearGhost()
       try {
-        ghost = el.clone()
-        this.ghostLayer.add(ghost)
-        ghost
-          .attr({ id: null, 'pointer-events': 'none', 'data-ghost': obj.id })
-          .removeClass('canvas-object')
-          .removeClass('is-selected')
-          .opacity(0.5)
-        ghostBaseTransform = (ghost.attr('transform') as string) || ''
+        const selectedIds = this._selectedObjects.map((o) => o.id)
+        const ghostIds = selectedIds.includes(obj.id) ? selectedIds : [obj.id]
+        const group = this.ghostLayer.group().attr({ 'pointer-events': 'none' }).opacity(0.5)
+        for (const gid of ghostIds) {
+          const src = gid === obj.id ? el : this._objectEls.get(gid)
+          if (!src) continue
+          const clone = src.clone()
+          group.add(clone)
+          clone
+            .attr({ id: null, 'pointer-events': 'none', 'data-ghost': gid })
+            .removeClass('canvas-object')
+            .removeClass('is-selected')
+        }
+        ghost = group
       } catch {
         ghost = null
       }
@@ -1680,7 +1685,7 @@ export class CanvasRenderer {
         const dx = box.x - startBox.x
         const dy = box.y - startBox.y
         try {
-          ghost.attr('transform', `translate(${dx} ${dy}) ${ghostBaseTransform}`.trim())
+          ghost.attr('transform', `translate(${dx} ${dy})`)
         } catch {
           /* noop */
         }

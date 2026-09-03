@@ -238,7 +238,9 @@ function wireObject(obj: RenderObject, el: any) {
       if (next.has(obj.id)) next.delete(obj.id)
       else next.add(obj.id)
       store.selectObjects([...next])
-    } else {
+    } else if (!store.selectedIds.includes(obj.id)) {
+      // Clicking an already-selected object keeps the whole selection so the
+      // ensuing drag moves the group; only a fresh click collapses to one.
       store.selectObjects([obj.id])
     }
   })
@@ -799,19 +801,34 @@ function onObjectDragEnd(id: string, { dx, dy, alt }: { dx: number; dy: number; 
   if (store.activeTool !== 'select') return
   const obj = store.getObject(id)
   if (!obj) return
-  // Alt-drag leaves the original in place and drops a copy at the drag offset.
+  // Dragging any object of a multi-selection moves the whole group by the same
+  // delta; a drag on an unselected object acts on it alone.
+  const groupIds = store.selectedIds.includes(id) ? [...store.selectedIds] : [id]
+
+  // Alt-drag leaves the originals in place and drops copies at the drag offset.
   if (alt) {
     store.snapshot('Duplicate')
-    const dup = store.duplicateObject(id, { x: dx, y: dy })
-    if (dup) store.selectObjects([dup.id])
+    const dups = groupIds
+      .map((gid) => store.duplicateObject(gid, { x: dx, y: dy }))
+      .filter((d): d is NonNullable<typeof d> => !!d)
+    if (dups.length) store.selectObjects(dups.map((d) => d.id))
     return
   }
+
   store.snapshot('Move')
+  for (const gid of groupIds) moveAndReparent(gid, dx, dy)
+
+  if (!store.selectedIds.includes(id)) store.selectObjects([id])
+}
+
+// Shift one object by (dx, dy) in canvas space, then reparent it if its new
+// center lands over a different artboard (keeping it visually in place).
+// Dropping over empty canvas leaves ownership unchanged.
+function moveAndReparent(id: string, dx: number, dy: number) {
+  const obj = store.getObject(id)
+  if (!obj) return
   store.moveObject(id, { x: (obj.x || 0) + dx, y: (obj.y || 0) + dy })
 
-  // Drag-to-reparent: if the object's new center lands over a different
-  // artboard, hand it to that artboard (keeping it visually in place). Dropping
-  // over empty canvas leaves ownership unchanged.
   const currentArtboard = obj.artboardId ? store.getArtboard(obj.artboardId) : null
   const center = {
     x: (currentArtboard?.x ?? 0) + (obj.x || 0) + (obj.width || 0) / 2,
@@ -821,8 +838,6 @@ function onObjectDragEnd(id: string, { dx, dy, alt }: { dx: number; dy: number; 
   if (target && target.id !== obj.artboardId) {
     store.reparentObject(id, target.id)
   }
-
-  if (!store.selectedIds.includes(id)) store.selectObjects([id])
 }
 
 // Node-edit commit: the renderer hands back the reshaped nodes (local frame);

@@ -1,6 +1,8 @@
 <template>
   <div class="toolbar">
-    <div class="toolbar-brand">LogoPacker</div>
+    <div class="toolbar-brand">
+      <img class="toolbar-logo" src="/android-chrome-512x512.png" alt="logo">
+    </div>
     <div class="toolbar-actions">
       <button class="tb-btn tb-btn-undo" :disabled="!canUndo" :title="undoTitle" @click="undo">
         {{ undoLabel }}
@@ -32,7 +34,7 @@
       >
         <IconAgent :is-outline="!activityOpen"></IconAgent>
       </button>
-      <button class="tb-btn" title="Export" @click="emit('export')">Export</button>
+      <button class="tb-btn tb-btn--cta" title="Export" @click="emit('export')">Export</button>
     </div>
   </div>
 </template>
@@ -118,6 +120,12 @@ function sendToBack() {
   letter-spacing: 0.12em;
   color: #211a43;
   font-size: 15px;
+  display: flex;
+  align-items: center;
+}
+.toolbar-logo {
+  width: 30px;
+  height: 30px;
 }
 .toolbar-actions {
   display: flex;
@@ -133,6 +141,15 @@ function sendToBack() {
   font-size: 13px;
   cursor: pointer;
   transition: background 0.12s ease;
+}
+.tb-btn--cta{
+  background: #458fd5;
+  height: 100%;
+  color: white;
+  padding-block: 12px;
+}
+.tb-btn--cta:hover:not(:disabled){
+  background: #346ea4 !important;
 }
 .tb-btn:hover:not(:disabled) {
   background: #f4f4f5;
