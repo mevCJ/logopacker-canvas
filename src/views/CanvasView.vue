@@ -1,10 +1,18 @@
 <template>
   <div class="canvas-page">
-    <Toolbar :activity-open="showActivity" @fit-view="fitView" @toggle-activity="showActivity = !showActivity" />
+    <Toolbar
+      :activity-open="showActivity"
+      @fit-view="fitView"
+      @toggle-activity="showActivity = !showActivity"
+      @export="showExport = !showExport"
+    />
     <div class="canvas-body">
       <CanvasStage ref="stage" class="canvas-stage-host" />
       <ToolSidebar @open-image-picker="onOpenImagePicker" />
       <ImageToolPopover v-if="imagePicker.open" :anchor="imagePicker.anchor" @close="imagePicker.open = false" />
+      <div v-if="showExport" class="export-overlay" @mousedown="showExport = false">
+        <ExportDialog @close="showExport = false" />
+      </div>
       <PropertyPanel />
       <Transition name="activity-slide">
         <AgentActivityLog v-if="showActivity" />
@@ -23,12 +31,14 @@ import CanvasStage from '@/components/canvas/CanvasStage.vue'
 import Toolbar from '@/components/canvas/Toolbar.vue'
 import ToolSidebar from '@/components/canvas/ToolSidebar.vue'
 import ImageToolPopover from '@/components/canvas/ImageToolPopover.vue'
+import ExportDialog from '@/components/canvas/ExportDialog.vue'
 import PropertyPanel from '@/components/canvas/PropertyPanel.vue'
 import AgentActivityLog from '@/components/canvas/AgentActivityLog.vue'
 
 const store = useCanvasStore()
 const stage = ref<{ fitViewBox: () => void } | null>(null)
 const showActivity = ref(false)
+const showExport = ref(false)
 let unregisterTools: (() => void) | null = null
 
 const imagePicker = reactive<{ open: boolean; anchor: { left: number; top: number } | null }>({
@@ -105,6 +115,16 @@ onBeforeUnmount(() => {
   background-color: #ececed;
   background-image: radial-gradient(circle, rgba(0, 0, 0, 0.06) 1px, transparent 1px);
   background-size: 22px 22px;
+}
+/* Full-screen dimmed overlay that centers the export dialog. */
+.export-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(24, 24, 27, 0.32);
 }
 .activity-slide-enter-active,
 .activity-slide-leave-active {

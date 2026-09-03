@@ -8,6 +8,7 @@
       <span class="tb-sep" />
       <button class="tb-btn" title="Add artboard" @click="addArtboard">Add artboard</button>
       <button class="tb-btn" title="Fit view" @click="emit('fit-view')">Fit view</button>
+      <button class="tb-btn" title="Export" @click="emit('export')">Export</button>
       <span class="tb-sep" />
       <button class="tb-btn" :disabled="!hasSelection" title="Duplicate (Cmd/Ctrl+D)" @click="duplicate">
         Duplicate
@@ -42,7 +43,11 @@ import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useCanvasStore } from '@/stores/canvas'
 
-const emit = defineEmits<{ (e: 'fit-view'): void; (e: 'toggle-activity'): void }>()
+const emit = defineEmits<{
+  (e: 'fit-view'): void
+  (e: 'toggle-activity'): void
+  (e: 'export'): void
+}>()
 
 defineProps<{ activityOpen?: boolean }>()
 
