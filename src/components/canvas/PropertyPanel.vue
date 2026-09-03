@@ -76,6 +76,14 @@
           <label class="pp-label">Stroke width</label>
           <input type="number" min="0" step="0.5" class="pp-number" :value="selected.strokeWidth" @input="setStrokeWidth(num($event))" />
         </section>
+
+        <section v-if="selected.shape === 'rect'" class="pp-section">
+          <label class="pp-label">Corner radius <span class="pp-value">{{ Math.round(selected.cornerRadius || 0) }}</span></label>
+          <div class="pp-color-row">
+            <input type="range" min="0" :max="maxCornerRadius" step="1" class="pp-range" :value="selected.cornerRadius || 0" @input="setCornerRadius(num($event))" />
+            <input type="number" min="0" :max="maxCornerRadius" class="pp-number pp-rot-num" :value="Math.round(selected.cornerRadius || 0)" @input="setCornerRadius(num($event))" />
+          </div>
+        </section>
       </template>
 
       <!-- Text properties -->
@@ -195,6 +203,13 @@ const roleLabel = computed(() => {
   return r && r !== 'none' ? r : selected.value?.type || ''
 })
 
+// Corner radius is capped at half the rectangle's shorter (base) side.
+const maxCornerRadius = computed(() => {
+  const o = selected.value
+  if (!o || o.type !== 'path') return 0
+  return Math.floor(Math.min(o.baseWidth, o.baseHeight) / 2)
+})
+
 // Event value helpers keep the template terse while staying type-safe.
 function val(e: Event): string {
   return (e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value
@@ -240,6 +255,10 @@ function setHeight(v: number) {
   } else {
     store.resizeObject(o.id, { height: v })
   }
+}
+function setCornerRadius(v: number) {
+  if (!selected.value) return
+  store.setCornerRadius(selected.value.id, Math.max(0, v))
 }
 function setRotation(v: number) {
   if (!selected.value) return

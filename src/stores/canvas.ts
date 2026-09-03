@@ -2,6 +2,7 @@
 // SVG.js renders/syncs from this; both human interactions and WebMCP tools
 // mutate this state.
 import { defineStore } from 'pinia'
+import { rectPathData } from '@/services/canvas/svgEngine'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,6 +90,16 @@ export interface PathObject extends BaseObject {
   fill: string
   stroke: string
   strokeWidth: number
+  // Optional primitive discriminator for shapes drawn by the shape tool. Lets
+  // the UI offer shape-specific controls (e.g. rectangle corner radius).
+  shape?: 'rect' | 'ellipse' | 'line'
+  // Rectangle corner radius, in the object's base coordinate space (scales with
+  // the object). Only meaningful when shape === 'rect'.
+  // ponytail: corners scale with the object's transform, so non-uniform resize
+  // (width≠height ratio vs base) skews round corners into elliptical ones, same
+  // as scaling a rounded rect in most vector tools. Upgrade path: regenerate d
+  // from current width/height on resize instead of scaling d via transform.
+  cornerRadius?: number
 }
 
 export interface TextObject extends BaseObject {
@@ -538,6 +549,18 @@ export const useCanvasStore = defineStore('canvas', {
       const obj = this.objects[id]
       if (!obj || obj.type !== 'path') return null
       obj.d = d
+      return obj
+    },
+
+    // Set a rectangle's corner radius and regenerate its path data. Radius is in
+    // the object's base coordinate space so it scales with the shape (matching
+    // how the renderer scales all path geometry). No-op for non-rect paths.
+    setCornerRadius(id: string, radius: number): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj || obj.type !== 'path' || obj.shape !== 'rect') return null
+      const r = Math.max(0, radius)
+      obj.cornerRadius = r
+      obj.d = rectPathData(obj.baseWidth, obj.baseHeight, r)
       return obj
     },
 

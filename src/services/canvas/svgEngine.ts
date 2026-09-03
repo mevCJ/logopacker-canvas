@@ -32,6 +32,8 @@ export interface RenderObject {
   rotation?: number
   opacity?: number
   d?: string
+  shape?: string
+  cornerRadius?: number
   fill?: string | null
   stroke?: string | null
   strokeWidth?: number
@@ -179,10 +181,19 @@ export function clampZoom(box: Box, base: Box, min = 0.15, max = 8): Box {
 // own origin (0, 0).
 // ---------------------------------------------------------------------------
 
-export function rectPathData(width: number, height: number): string {
+export function rectPathData(width: number, height: number, radius = 0): string {
   const w = Math.max(0, width)
   const h = Math.max(0, height)
-  return `M0 0 H${w} V${h} H0 Z`
+  // Clamp the corner radius so it never exceeds half the shorter side.
+  const r = Math.max(0, Math.min(radius, w / 2, h / 2))
+  if (r === 0) return `M0 0 H${w} V${h} H0 Z`
+  // Rounded rect: straight edges joined by quarter-circle arcs at each corner.
+  return (
+    `M${r} 0 H${w - r} A${r} ${r} 0 0 1 ${w} ${r} ` +
+    `V${h - r} A${r} ${r} 0 0 1 ${w - r} ${h} ` +
+    `H${r} A${r} ${r} 0 0 1 0 ${h - r} ` +
+    `V${r} A${r} ${r} 0 0 1 ${r} 0 Z`
+  )
 }
 
 export function ellipsePathData(width: number, height: number): string {
@@ -489,11 +500,13 @@ export function buildShapePayload(
   artboard: { x: number; y: number } | null,
 ): {
   type: 'path'
+  shape: 'rect' | 'ellipse' | 'line'
   d: string
   x: number
   y: number
   width: number
   height: number
+  cornerRadius?: number
   fill: string
   stroke: string
   strokeWidth: number
@@ -512,6 +525,7 @@ export function buildShapePayload(
     const y = Math.min(localY1, localY2)
     return {
       type: 'path',
+      shape: 'line',
       // Path data is stored relative to the object origin (x, y).
       d: linePathData(localX1 - x, localY1 - y, localX2 - x, localY2 - y),
       x,
@@ -530,11 +544,13 @@ export function buildShapePayload(
   const d = type === 'ellipse' ? ellipsePathData(box.width, box.height) : rectPathData(box.width, box.height)
   return {
     type: 'path',
+    shape: type,
     d,
     x: box.x - ax,
     y: box.y - ay,
     width: box.width,
     height: box.height,
+    ...(type === 'rect' ? { cornerRadius: 0 } : {}),
     fill: '#211A43',
     stroke: 'none',
     strokeWidth: 0,

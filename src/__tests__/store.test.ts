@@ -214,6 +214,17 @@ describe('canvas store — resize + rotate', () => {
     expect(after.baseHeight).toBe(100)
   })
 
+  it('setCornerRadius regenerates rounded-rect d from base dims, non-rects ignored', () => {
+    const rect = store.addObject({ type: 'path', shape: 'rect', width: 100, height: 60, d: 'M0 0 H100 V60 H0 Z' })
+    const out = store.setCornerRadius(rect.id, 12) as any
+    expect(out.cornerRadius).toBe(12)
+    expect(out.d).toContain('A12 12')
+    // A plain path (no shape) is left untouched.
+    const plain = store.addObject({ type: 'path', d: 'M0 0 L10 10' })
+    expect(store.setCornerRadius(plain.id, 5)).toBeNull()
+    expect((store.getObject(plain.id) as any).d).toBe('M0 0 L10 10')
+  })
+
   it('rotateObject normalizes the angle into 0..360', () => {
     const o = store.addObject({ type: 'text' })
     expect((store.rotateObject(o.id, 45) as any).rotation).toBe(45)

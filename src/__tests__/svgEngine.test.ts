@@ -120,6 +120,18 @@ describe('svgEngine — shape + tool geometry helpers', () => {
     expect(rectPathData(100, 50)).toBe('M0 0 H100 V50 H0 Z')
     // Negative sizes are clamped to 0.
     expect(rectPathData(-10, 20)).toBe('M0 0 H0 V20 H0 Z')
+    // radius 0 keeps the sharp-corner form.
+    expect(rectPathData(100, 50, 0)).toBe('M0 0 H100 V50 H0 Z')
+  })
+
+  it('builds a rounded rectangle with clamped corner radius', () => {
+    const d = rectPathData(100, 50, 10)
+    expect(d).toBe(
+      'M10 0 H90 A10 10 0 0 1 100 10 V40 A10 10 0 0 1 90 50 H10 A10 10 0 0 1 0 40 V10 A10 10 0 0 1 10 0 Z',
+    )
+    // Radius is clamped to half the shorter side (25 here), never exceeding it.
+    const clamped = rectPathData(100, 50, 999)
+    expect(clamped).toContain('A25 25')
   })
 
   it('builds ellipse path data using two arcs', () => {
@@ -188,10 +200,15 @@ describe('svgEngine — shape + tool geometry helpers', () => {
     expect(p.type).toBe('path')
     expect(p.d).toBe('M0 0 H100 V60 H0 Z')
     expect(p).toMatchObject({ x: 20, y: 30, width: 100, height: 60, fill: '#211A43', stroke: 'none' })
+    // Rectangles carry the shape discriminator and a default (0) corner radius.
+    expect(p.shape).toBe('rect')
+    expect(p.cornerRadius).toBe(0)
   })
 
   it('buildShapePayload builds an ellipse path', () => {
     const p = buildShapePayload('ellipse', { x: 0, y: 0 }, { x: 100, y: 60 }, null)!
+    expect(p.shape).toBe('ellipse')
+    expect(p.cornerRadius).toBeUndefined()
     expect(p.d).toContain('A50 30')
     expect(p).toMatchObject({ width: 100, height: 60 })
   })
