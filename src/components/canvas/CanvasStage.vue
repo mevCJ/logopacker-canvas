@@ -5,6 +5,8 @@
     :class="[{ panning: isPanning }, `tool-${activeTool}`]"
     @wheel.prevent="onWheel"
     @mousedown="onMouseDown"
+    @mousemove="onStageMouseMove"
+    @dblclick="onStageDblClick"
   >
     <textarea
       v-if="inlineEdit"
@@ -23,7 +25,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useCanvasStore } from '@/stores/canvas'
+import { useCanvasStore, type ToolId } from '@/stores/canvas'
 import {
   CanvasRenderer,
   documentBounds,
@@ -34,6 +36,7 @@ import {
   resolveArtboardAtPoint,
   mergeMarqueeSelection,
   buildShapePayload,
+  buildPenPayload,
   canvasPointToScreenRect,
   type Box,
   type RenderObject,
@@ -72,6 +75,13 @@ type ShapeTool = (typeof SHAPE_TOOLS)[number]
 function isShapeTool(t: string): t is ShapeTool {
   return (SHAPE_TOOLS as readonly string[]).includes(t)
 }
+
+// Pen tool state: an in-progress list of anchor points (canvas coords) built
+// up by successive clicks. `null` means no path is being drawn. Clicking near
+// the first anchor closes the path; double-click / Enter finishes an open one.
+let penPoints: { x: number; y: number }[] | null = null
+// Close threshold in screen pixels (converted to canvas units at click time).
+const PEN_CLOSE_PX = 12
 
 // Inline text editing overlay state.
 const inlineInput = ref<HTMLTextAreaElement | null>(null)
@@ -259,7 +269,7 @@ function onMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
 
   const tool = store.activeTool
-  const wantPan = spacePressed.value || tool === 'image' || tool === 'text'
+  const wantPan = spacePressed.value || tool === 'image' || tool === 'text' || tool === 'pen'
 
   if (!wantPan && (tool === 'select' || isShapeTool(tool))) {
     const p = renderer.screenToCanvas(e.clientX, e.clientY)
@@ -371,7 +381,89 @@ function handleEmptyClick(e: MouseEvent) {
     placeImage(e.clientX, e.clientY)
     return
   }
+  if (tool === 'pen') {
+    penClick(e.clientX, e.clientY)
+    return
+  }
   store.clearSelection()
+}
+
+// --- Pen tool: multi-click polygonal path builder ------------------------
+function penDistanceThreshold(): number {
+  // Convert the screen-pixel close radius to canvas units at current zoom.
+  if (!renderer || !mount.value) return PEN_CLOSE_PX
+  const rect = mount.value.getBoundingClientRect()
+  const vb = renderer.getViewBox()
+  const perPx = rect.width ? vb.width / rect.width : 1
+  return PEN_CLOSE_PX * perPx
+}
+
+function penClick(clientX: number, clientY: number) {
+  if (!renderer) return
+  const p = renderer.screenToCanvas(clientX, clientY)
+  if (!penPoints) {
+    penPoints = [p]
+  } else {
+    const first = penPoints[0]!
+    const dx = p.x - first.x
+    const dy = p.y - first.y
+    const near = Math.hypot(dx, dy) <= penDistanceThreshold()
+    if (near && penPoints.length >= 3) {
+      finishPen(true)
+      return
+    }
+    penPoints.push(p)
+  }
+  renderer.showPenPreview(penPoints, null, false)
+}
+
+// Live rubber-band segment from the last anchor to the cursor.
+function onPenMove(e: MouseEvent) {
+  if (!renderer || !penPoints || !penPoints.length) return
+  const cursor = renderer.screenToCanvas(e.clientX, e.clientY)
+  const first = penPoints[0]!
+  const near =
+    penPoints.length >= 3 &&
+    Math.hypot(cursor.x - first.x, cursor.y - first.y) <= penDistanceThreshold()
+  renderer.showPenPreview(penPoints, cursor, near)
+}
+
+// Commit the in-progress pen path as a path object, or discard if too short.
+function finishPen(closed: boolean) {
+  const points = penPoints
+  penPoints = null
+  if (renderer) renderer.hidePenPreview()
+  if (!points || points.length < 2) return
+  // A double-click fires a click (adding an anchor) immediately before it, so
+  // drop a duplicated trailing point to avoid a zero-length final segment.
+  if (points.length >= 2) {
+    const a = points[points.length - 1]!
+    const b = points[points.length - 2]!
+    if (a.x === b.x && a.y === b.y) points.pop()
+  }
+  if (points.length < 2) return
+  const artboard = resolveArtboardAtPoint(store.artboards, points[0]!)
+  const payload = buildPenPayload(points, artboard, closed)
+  if (!payload) return
+  store.snapshot('Add path')
+  const obj = store.addObject({ ...payload, artboardId: artboard?.id ?? null })
+  store.selectObjects([obj.id])
+  // Tool stays armed for drawing multiple paths.
+}
+
+function cancelPen() {
+  penPoints = null
+  if (renderer) renderer.hidePenPreview()
+}
+
+function onStageMouseMove(e: MouseEvent) {
+  if (store.activeTool === 'pen' && penPoints) onPenMove(e)
+}
+
+function onStageDblClick(e: MouseEvent) {
+  if (store.activeTool !== 'pen' || !penPoints) return
+  e.preventDefault()
+  finishPen(false)
 }
 
 // --- Shape tool: commit a drawn shape to the store ------------------------
@@ -451,11 +543,37 @@ function onKeyDown(e: KeyboardEvent) {
     return
   }
 
+  // Pen: Enter finishes an open path; Escape cancels an in-progress path
+  // (without leaving the tool) so the user can start over.
+  if (store.activeTool === 'pen' && penPoints) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      finishPen(false)
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      cancelPen()
+      return
+    }
+  }
+
   // Escape returns to the Select tool (and closes any transient state).
   if (e.key === 'Escape' && store.activeTool !== 'select') {
     e.preventDefault()
     store.setActiveTool('select')
     return
+  }
+
+  // Single-key tool hotkeys (ignore when a modifier is held, e.g. Cmd+T).
+  if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+    const toolKeys: Record<string, ToolId> = { v: 'select', t: 'text', p: 'pen', l: 'rect' }
+    const tool = toolKeys[e.key.toLowerCase()]
+    if (tool) {
+      e.preventDefault()
+      store.setActiveTool(tool)
+      return
+    }
   }
 
   if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
@@ -543,8 +661,10 @@ watch(activeTool, () => {
   if (renderer) {
     renderer.hideMarquee()
     renderer.hideShapePreview()
+    renderer.hidePenPreview()
   }
   toolDrag = null
+  penPoints = null
 })
 
 // Keep the inline editor aligned while its target text object exists.
@@ -578,7 +698,8 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
 .canvas-stage.tool-rect,
 .canvas-stage.tool-ellipse,
 .canvas-stage.tool-line,
-.canvas-stage.tool-text {
+.canvas-stage.tool-text,
+.canvas-stage.tool-pen {
   cursor: crosshair;
 }
 .canvas-stage.tool-image {

@@ -16,6 +16,13 @@
         Delete
       </button>
       <span class="tb-sep" />
+      <button class="tb-btn" :disabled="!hasSelection" title="Send to front" @click="bringToFront">
+        To front
+      </button>
+      <button class="tb-btn" :disabled="!hasSelection" title="Send to back" @click="sendToBack">
+        To back
+      </button>
+      <span class="tb-sep" />
       <span class="tb-hint">{{ selectionLabel }}</span>
       <span class="tb-sep" />
       <button
@@ -79,6 +86,14 @@ function duplicate() {
 function remove() {
   store.snapshot('Delete')
   ;[...store.selectedIds].forEach((id) => store.removeObject(id))
+}
+function bringToFront() {
+  store.snapshot('Send to front')
+  ;[...store.selectedIds].forEach((id) => store.bringToFront(id))
+}
+function sendToBack() {
+  store.snapshot('Send to back')
+  ;[...store.selectedIds].forEach((id) => store.sendToBack(id))
 }
 </script>
 

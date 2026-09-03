@@ -20,6 +20,9 @@ import {
   resolveArtboardAtPoint,
   mergeMarqueeSelection,
   buildShapePayload,
+  penPathData,
+  pointsBounds,
+  buildPenPayload,
   canvasPointToScreenRect,
   rotatePoint,
   boxCenter,
@@ -207,6 +210,49 @@ describe('svgEngine — shape + tool geometry helpers', () => {
   it('buildShapePayload rejects degenerate drags', () => {
     expect(buildShapePayload('rect', { x: 10, y: 10 }, { x: 10, y: 10 }, null)).toBeNull()
     expect(buildShapePayload('line', { x: 10, y: 10 }, { x: 10, y: 10 }, null)).toBeNull()
+  })
+
+  it('penPathData builds an open polyline and closes with Z', () => {
+    const pts = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]
+    expect(penPathData(pts)).toBe('M0 0 L10 0 L10 10')
+    expect(penPathData(pts, true)).toBe('M0 0 L10 0 L10 10 Z')
+    // Fewer than 3 points can't be a closed area.
+    expect(penPathData([{ x: 0, y: 0 }, { x: 10, y: 0 }], true)).toBe('M0 0 L10 0')
+  })
+
+  it('pointsBounds spans the min/max of all points', () => {
+    expect(pointsBounds([{ x: 5, y: 8 }, { x: 20, y: 3 }, { x: 12, y: 30 }])).toEqual({
+      x: 5,
+      y: 3,
+      width: 15,
+      height: 27,
+    })
+  })
+
+  it('buildPenPayload builds a closed, filled path in artboard-local coords', () => {
+    const pts = [
+      { x: 120, y: 130 },
+      { x: 180, y: 130 },
+      { x: 150, y: 180 },
+    ]
+    const p = buildPenPayload(pts, { x: 100, y: 100 }, true)!
+    expect(p.type).toBe('path')
+    // Local origin = bbox top-left (120-100, 130-100) = (20, 30); d relative to it.
+    expect(p).toMatchObject({ x: 20, y: 30, width: 60, height: 50, fill: '#211A43', stroke: 'none' })
+    expect(p.d).toBe('M0 0 L60 0 L30 50 Z')
+  })
+
+  it('buildPenPayload builds an open, stroked path', () => {
+    const p = buildPenPayload([{ x: 0, y: 0 }, { x: 40, y: 20 }], null, false)!
+    expect(p.fill).toBe('none')
+    expect(p.stroke).toBe('#211A43')
+    expect(p.strokeWidth).toBe(2)
+    expect(p.d).toBe('M0 0 L40 20')
+  })
+
+  it('buildPenPayload rejects paths with fewer than 2 points', () => {
+    expect(buildPenPayload([{ x: 10, y: 10 }], null)).toBeNull()
+    expect(buildPenPayload([], null)).toBeNull()
   })
 
   it('canvasPointToScreenRect maps canvas coords to host-relative screen coords', () => {

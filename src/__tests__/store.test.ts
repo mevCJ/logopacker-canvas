@@ -302,3 +302,36 @@ describe('canvas store — artboard layout', () => {
     }
   })
 })
+
+describe('canvas store — layering', () => {
+  let store: ReturnType<typeof useCanvasStore>
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useCanvasStore()
+    store.addArtboard({})
+  })
+
+  it('bringToFront moves the object to the end of paint order', () => {
+    const a = store.addObject({ type: 'path' })
+    const b = store.addObject({ type: 'path' })
+    const c = store.addObject({ type: 'path' })
+    expect(store.objectOrder).toEqual([a.id, b.id, c.id])
+    expect(store.bringToFront(a.id)).toBe(true)
+    expect(store.objectOrder).toEqual([b.id, c.id, a.id])
+  })
+
+  it('sendToBack moves the object to the start of paint order', () => {
+    const a = store.addObject({ type: 'path' })
+    const b = store.addObject({ type: 'path' })
+    const c = store.addObject({ type: 'path' })
+    expect(store.sendToBack(c.id)).toBe(true)
+    expect(store.objectOrder).toEqual([c.id, a.id, b.id])
+  })
+
+  it('returns false for an unknown id and leaves order untouched', () => {
+    const a = store.addObject({ type: 'path' })
+    expect(store.bringToFront('nope')).toBe(false)
+    expect(store.sendToBack('nope')).toBe(false)
+    expect(store.objectOrder).toEqual([a.id])
+  })
+})

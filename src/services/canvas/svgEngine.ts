@@ -196,6 +196,35 @@ export function linePathData(x1: number, y1: number, x2: number, y2: number): st
   return `M${x1} ${y1} L${x2} ${y2}`
 }
 
+// Build SVG path data from an ordered list of anchor points (straight segments,
+// the "polygonal pen"). `closed` appends a Z so fills render as a solid shape.
+// Points are in the path's own local frame.
+export function penPathData(points: { x: number; y: number }[], closed = false): string {
+  const first = points[0]
+  if (!first) return ''
+  let d = `M${first.x} ${first.y}`
+  for (let i = 1; i < points.length; i++) d += ` L${points[i]!.x} ${points[i]!.y}`
+  if (closed && points.length > 2) d += ' Z'
+  return d
+}
+
+// Axis-aligned bounds of a set of points. Returns a zero-size box at the point
+// (or origin) when there aren't enough points to span an area.
+export function pointsBounds(points: { x: number; y: number }[]): Box {
+  if (!points.length) return { x: 0, y: 0, width: 0, height: 0 }
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const p of points) {
+    minX = Math.min(minX, p.x)
+    minY = Math.min(minY, p.y)
+    maxX = Math.max(maxX, p.x)
+    maxY = Math.max(maxY, p.y)
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+}
+
 // Normalize a drag defined by two points into an axis-aligned box with a
 // non-negative width/height, regardless of drag direction.
 export function normalizeDragBox(
@@ -513,6 +542,48 @@ export function buildShapePayload(
   }
 }
 
+// Build the store payload for a pen path drawn as a list of anchor points (in
+// canvas coordinates) over the given artboard. Positions are converted to the
+// artboard's local space and the path data is stored relative to the object
+// origin (its bounding-box top-left). A closed path is filled; an open path is
+// stroked. Returns null for a degenerate (< 2 point) path.
+export function buildPenPayload(
+  points: { x: number; y: number }[],
+  artboard: { x: number; y: number } | null,
+  closed = false,
+): {
+  type: 'path'
+  d: string
+  x: number
+  y: number
+  width: number
+  height: number
+  fill: string
+  stroke: string
+  strokeWidth: number
+  semanticRole: string
+} | null {
+  if (!points || points.length < 2) return null
+  const ax = artboard ? artboard.x : 0
+  const ay = artboard ? artboard.y : 0
+  const local = points.map((p) => ({ x: p.x - ax, y: p.y - ay }))
+  const bounds = pointsBounds(local)
+  // Store geometry relative to the object origin (bounds top-left).
+  const rel = local.map((p) => ({ x: p.x - bounds.x, y: p.y - bounds.y }))
+  return {
+    type: 'path',
+    d: penPathData(rel, closed),
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+    fill: closed ? '#211A43' : 'none',
+    stroke: closed ? 'none' : '#211A43',
+    strokeWidth: closed ? 0 : 2,
+    semanticRole: 'decorative',
+  }
+}
+
 export function documentBounds(artboards: RenderArtboard[] | undefined, padding = 200): Box {
   if (!artboards || artboards.length === 0) {
     return { x: 0, y: 0, width: 1000, height: 700 }
@@ -654,7 +725,22 @@ export class CanvasRenderer {
   }
 
   screenToCanvas(clientX: number, clientY: number): { x: number; y: number } {
-    const rect = (this.draw.node as SVGSVGElement).getBoundingClientRect()
+    const svg = this.draw.node as SVGSVGElement
+    // Use the browser's own screen->user-space transform, which correctly
+    // accounts for preserveAspectRatio letterboxing (the root SVG defaults to
+    // xMidYMid meet). The naive rect-ratio mapping stretches each axis
+    // independently and drifts off the cursor whenever the element and viewBox
+    // aspect ratios differ.
+    const ctm = svg.getScreenCTM?.()
+    if (ctm) {
+      const pt = svg.createSVGPoint()
+      pt.x = clientX
+      pt.y = clientY
+      const local = pt.matrixTransform(ctm.inverse())
+      return { x: local.x, y: local.y }
+    }
+    // Fallback for non-DOM/test environments without getScreenCTM.
+    const rect = svg.getBoundingClientRect()
     const vb = this.getViewBox()
     const relX = (clientX - rect.left) / rect.width
     const relY = (clientY - rect.top) / rect.height
@@ -678,6 +764,19 @@ export class CanvasRenderer {
     this._redrawSelection()
   }
 
+  // Approximate the box a text object occupies when the platform can't measure
+  // it (empty string / not yet laid out). The renderer places the text baseline
+  // at y = fontSize, so the glyph box starts ~one fontSize above the baseline;
+  // `ascent` shifts the box up to sit over the visible glyphs.
+  private _textFallbackBox(obj: RenderObject): { width: number; height: number; ascent: number } {
+    const fontSize = obj.fontSize || 24
+    const chars = Math.max((obj.text || '').length, 1)
+    // Rough monospace-ish estimate; good enough for an editing outline.
+    const width = Math.max(obj.width || 0, chars * fontSize * 0.6, fontSize)
+    const height = fontSize * 1.2
+    return { width, height, ascent: fontSize }
+  }
+
   // Absolute (canvas-space) bounding box of an object, in its un-rotated frame.
   private _objectBox(obj: RenderObject): Box | null {
     const ab = obj.artboardId ? this._artboardBoxes.get(obj.artboardId) : null
@@ -696,6 +795,14 @@ export class CanvasRenderer {
       if (el) {
         try {
           const b = el.bbox()
+          // An empty (or still-being-typed) text element measures 0×0, which
+          // would collapse the selection outline + handles to a point. Fall
+          // back to a fontSize-derived box so the boundary is visible and the
+          // handles remain usable.
+          if (obj.type === 'text' && (!b.width || !b.height)) {
+            const fallback = this._textFallbackBox(obj)
+            return { x: originX, y: originY - fallback.ascent, width: fallback.width, height: fallback.height }
+          }
           const dispW = obj.width || 0
           const dispH = obj.height || 0
           const sx = obj.type === 'text' ? 1 : obj.baseWidth ? dispW / obj.baseWidth : 1
@@ -1070,7 +1177,12 @@ export class CanvasRenderer {
       if (!obj) continue
       seen.add(id)
       const artboard = obj.artboardId ? artboardMap.get(obj.artboardId) : undefined
-      this._renderObject(obj, artboard)
+      const el = this._renderObject(obj, artboard)
+      // _renderObject reuses the cached element and never re-appends it, so DOM
+      // paint order otherwise stays frozen at creation order. Re-assert it here:
+      // walking `order` and sending each to front leaves the layer in exactly
+      // objectOrder's sequence, so layering (send to front/back) takes effect.
+      el.front()
     }
 
     for (const [id, el] of this._objectEls) {
@@ -1162,6 +1274,12 @@ export class CanvasRenderer {
     // real element stays put until the user drops, at which point we commit the
     // final delta to the store.
     let ghost: SvgEl | null = null
+    // The clone keeps the original's transform (which, for text, carries its
+    // position). Moving the ghost by writing x/y attributes therefore breaks for
+    // text (its position lives in the transform, so x has no effect while y
+    // does). Instead we prepend a translate by the drag delta, which tracks the
+    // cursor on both axes for every element type.
+    let ghostBaseTransform = ''
 
     const clearGhost = () => {
       if (ghost) {
@@ -1186,6 +1304,7 @@ export class CanvasRenderer {
           .removeClass('canvas-object')
           .removeClass('is-selected')
           .opacity(0.5)
+        ghostBaseTransform = (ghost.attr('transform') as string) || ''
       } catch {
         ghost = null
       }
@@ -1195,9 +1314,11 @@ export class CanvasRenderer {
       // the original stays fixed while the preview tracks the cursor.
       e.preventDefault()
       const box = (e.detail as { box: { x: number; y: number } }).box
-      if (ghost) {
+      if (ghost && startBox) {
+        const dx = box.x - startBox.x
+        const dy = box.y - startBox.y
         try {
-          ghost.move(box.x, box.y)
+          ghost.attr('transform', `translate(${dx} ${dy}) ${ghostBaseTransform}`.trim())
         } catch {
           /* noop */
         }
@@ -1224,6 +1345,7 @@ export class CanvasRenderer {
   // ---- Tool overlays (marquee + shape preview) --------------------------
   private _marqueeEl: SvgEl | null = null
   private _previewEl: SvgEl | null = null
+  private _penEl: SvgEl | null = null
 
   // Draw/update the marquee selection rectangle. Box is in canvas coordinates.
   showMarquee(box: Box): void {
@@ -1289,6 +1411,49 @@ export class CanvasRenderer {
     }
   }
 
+  // Draw/update the in-progress pen path: committed anchors + segments, plus a
+  // rubber-band segment to the cursor. `nearStart` highlights the first anchor
+  // to signal that clicking will close the path. All points in canvas coords.
+  showPenPreview(
+    points: { x: number; y: number }[],
+    cursor: { x: number; y: number } | null,
+    nearStart = false,
+  ): void {
+    this.hidePenPreview()
+    if (!points.length) return
+    const vb = this.getViewBox()
+    const strokeW = Math.max(0.5, vb.width / 700)
+    const g = this.toolLayer.group().attr({ 'pointer-events': 'none' })
+
+    const path = [...points]
+    if (cursor) path.push(cursor)
+    if (path.length > 1) {
+      const d = penPathData(path, false)
+      g.path(d).fill('none').stroke({ color: '#2563eb', width: strokeW })
+    }
+
+    const r = Math.max(2, vb.width / 240)
+    points.forEach((p, i) => {
+      const first = i === 0
+      g.circle(r * 2)
+        .center(p.x, p.y)
+        .fill(first && nearStart ? '#2563eb' : '#ffffff')
+        .stroke({ color: '#2563eb', width: strokeW })
+    })
+    this._penEl = g
+  }
+
+  hidePenPreview(): void {
+    if (this._penEl) {
+      try {
+        this._penEl.remove()
+      } catch {
+        /* noop */
+      }
+      this._penEl = null
+    }
+  }
+
   // Return the ids of object elements whose rendered box intersects the given
   // canvas-space box. Used for marquee selection.
   hitTestBox(box: Box): string[] {
@@ -1315,6 +1480,7 @@ export class CanvasRenderer {
   destroy(): void {
     this.hideMarquee()
     this.hideShapePreview()
+    this.hidePenPreview()
     try {
       this.draw.remove()
     } catch {

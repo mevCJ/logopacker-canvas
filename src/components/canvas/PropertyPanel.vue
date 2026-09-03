@@ -1,6 +1,49 @@
 <template>
   <aside class="property-panel">
-    <div v-if="!selected" class="pp-empty">
+    <!-- Artboard properties (shown when an artboard is selected and no object is) -->
+    <div v-if="!selected && artboard" class="pp-body">
+      <header class="pp-header">
+        <span class="pp-role">Artboard</span>
+        <span class="pp-type">artboard</span>
+      </header>
+
+      <section class="pp-section">
+        <label class="pp-label">Name</label>
+        <input type="text" class="pp-text-input" :value="artboard.name" @change="updateArtboard({ name: val($event) })" />
+      </section>
+
+      <section class="pp-section pp-row-2">
+        <div>
+          <label class="pp-label">X</label>
+          <input type="number" class="pp-number" :value="Math.round(artboard.x)" @input="updateArtboard({ x: num($event) })" />
+        </div>
+        <div>
+          <label class="pp-label">Y</label>
+          <input type="number" class="pp-number" :value="Math.round(artboard.y)" @input="updateArtboard({ y: num($event) })" />
+        </div>
+      </section>
+
+      <section class="pp-section pp-row-2">
+        <div>
+          <label class="pp-label">Width</label>
+          <input type="number" min="1" class="pp-number" :value="Math.round(artboard.width)" @input="updateArtboard({ width: Math.max(1, num($event)) })" />
+        </div>
+        <div>
+          <label class="pp-label">Height</label>
+          <input type="number" min="1" class="pp-number" :value="Math.round(artboard.height)" @input="updateArtboard({ height: Math.max(1, num($event)) })" />
+        </div>
+      </section>
+
+      <section class="pp-section">
+        <label class="pp-label">Background</label>
+        <div class="pp-color-row">
+          <input type="color" class="pp-swatch" :value="normalizeColor(artboard.backgroundColor)" @input="setArtboardBackground(val($event))" />
+          <input type="text" class="pp-text-input" :value="artboard.backgroundColor" @change="setArtboardBackground(val($event))" />
+        </div>
+      </section>
+    </div>
+
+    <div v-else-if="!selected" class="pp-empty">
       <p class="pp-empty-title">No selection</p>
       <p class="pp-empty-sub">Select an object on the canvas to edit its properties.</p>
     </div>
@@ -146,6 +189,7 @@ const alignments = TEXT_ALIGNMENTS
 const roles = SEMANTIC_ROLES
 
 const selected = computed(() => store.singleSelected)
+const artboard = computed(() => store.selectedArtboard)
 const roleLabel = computed(() => {
   const r = selected.value?.semanticRole
   return r && r !== 'none' ? r : selected.value?.type || ''
@@ -200,6 +244,17 @@ function setHeight(v: number) {
 function setRotation(v: number) {
   if (!selected.value) return
   store.rotateObject(selected.value.id, v)
+}
+
+function updateArtboard(patch: Record<string, unknown>) {
+  if (!artboard.value) return
+  store.snapshot('Edit artboard')
+  store.updateArtboard(artboard.value.id, patch)
+}
+function setArtboardBackground(v: string) {
+  if (!artboard.value) return
+  store.snapshot('Edit artboard')
+  store.setArtboardBackground(artboard.value.id, v)
 }
 
 function normalizeColor(c: unknown): string {

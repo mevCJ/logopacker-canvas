@@ -118,6 +118,42 @@ describe('CanvasRenderer — tool overlays', () => {
     expect(host.querySelectorAll('.handle-layer circle[data-handle="rotate"]').length).toBe(1)
   })
 
+  it('draws a non-empty selection outline + handles for a freshly-placed empty text', () => {
+    // A just-created text object has an empty string, which measures 0×0 in the
+    // DOM. The selection box must still be visible + the handles usable.
+    const obj = {
+      id: 't1',
+      type: 'text' as const,
+      artboardId: 'ab',
+      x: 20,
+      y: 30,
+      width: 100,
+      height: 100,
+      baseWidth: 100,
+      baseHeight: 100,
+      rotation: 0,
+      text: '',
+      fontSize: 24,
+    }
+    renderer.render({
+      artboards: [{ id: 'ab', name: 'A', x: 0, y: 0, width: 400, height: 400 }],
+      objects: { t1: obj },
+      objectOrder: ['t1'],
+    })
+    renderer.setSelection(['t1'], [obj])
+
+    // 8 resize handles + rotate handle, all present with a real (non-zero) box.
+    expect(host.querySelectorAll('.handle-layer rect[data-handle]').length).toBe(8)
+    expect(host.querySelectorAll('.handle-layer circle[data-handle="rotate"]').length).toBe(1)
+
+    // The outline polygon should span a real area (handles aren't stacked on a
+    // single point). Corner handles must occupy distinct x positions.
+    const xs = new Set(
+      [...host.querySelectorAll('.handle-layer rect[data-handle]')].map((h) => h.getAttribute('x')),
+    )
+    expect(xs.size).toBeGreaterThan(1)
+  })
+
   it('draws no handles for a multi-selection', () => {
     const a = { id: 'a', type: 'path' as const, artboardId: 'ab', x: 0, y: 0, width: 50, height: 50, baseWidth: 50, baseHeight: 50, rotation: 0, d: 'M0 0 H50 V50 H0 Z', fill: '#000' }
     const b = { id: 'b', type: 'path' as const, artboardId: 'ab', x: 80, y: 0, width: 50, height: 50, baseWidth: 50, baseHeight: 50, rotation: 0, d: 'M0 0 H50 V50 H0 Z', fill: '#000' }

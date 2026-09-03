@@ -24,7 +24,7 @@ export type ObjectType = (typeof OBJECT_TYPES)[number]
 
 // User-facing canvas tools (the floating tool sidebar). 'select' is the idle
 // default; the others arm a creation mode until the user switches back.
-export const TOOL_IDS = ['select', 'text', 'rect', 'ellipse', 'line', 'image'] as const
+export const TOOL_IDS = ['select', 'text', 'pen', 'rect', 'ellipse', 'line', 'image'] as const
 export type ToolId = (typeof TOOL_IDS)[number]
 
 // A staged image chosen (uploaded or picked from Pexels) but not yet placed.
@@ -430,6 +430,24 @@ export const useCanvasStore = defineStore('canvas', {
       if (typeof x === 'number') obj.x = x
       if (typeof y === 'number') obj.y = y
       return obj
+    },
+
+    // ---- Layering (z-order) ------------------------------------------------
+    // objectOrder is the single global paint order the renderer draws in, so
+    // moving an id to the end brings it to front, to the start sends it back.
+    bringToFront(id: string): boolean {
+      const i = this.objectOrder.indexOf(id)
+      if (i === -1) return false
+      this.objectOrder.splice(i, 1)
+      this.objectOrder.push(id)
+      return true
+    },
+    sendToBack(id: string): boolean {
+      const i = this.objectOrder.indexOf(id)
+      if (i === -1) return false
+      this.objectOrder.splice(i, 1)
+      this.objectOrder.unshift(id)
+      return true
     },
 
     assignToArtboard(id: string, artboardId: string | null): CanvasObject | null {

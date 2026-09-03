@@ -23,6 +23,19 @@
       </svg>
     </button>
 
+    <button
+      class="tool-btn"
+      :class="{ active: activeTool === 'pen' }"
+      title="Pen (P)"
+      @click="pick('pen')"
+    >
+      <!-- fountain-pen nib -->
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M4 20l3.5-9L15 3.5a2 2 0 012.8 0l.7.7a2 2 0 010 2.8L11 15z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+        <path d="M7.5 11L11 15M4 20l3-1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </svg>
+    </button>
+
     <!-- Shapes: button + flyout -->
     <div class="tool-shape-wrap">
       <button

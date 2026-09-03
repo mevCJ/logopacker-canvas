@@ -13,9 +13,11 @@ describe('ToolSidebar', () => {
     const store = useCanvasStore()
     const wrapper = mount(ToolSidebar)
     const buttons = wrapper.findAll('.tool-btn')
-    // Order: select, text, shapes, image.
+    // Order: select, text, pen, shapes, image.
     await buttons[1]!.trigger('click')
     expect(store.activeTool).toBe('text')
+    await buttons[2]!.trigger('click')
+    expect(store.activeTool).toBe('pen')
     await buttons[0]!.trigger('click')
     expect(store.activeTool).toBe('select')
   })
@@ -23,7 +25,7 @@ describe('ToolSidebar', () => {
   it('opens the shape flyout and arms each shape tool', async () => {
     const store = useCanvasStore()
     const wrapper = mount(ToolSidebar)
-    const shapesBtn = wrapper.findAll('.tool-btn')[2]!
+    const shapesBtn = wrapper.findAll('.tool-btn')[3]!
     await shapesBtn.trigger('click')
     const flyoutBtns = wrapper.findAll('.flyout-btn')
     expect(flyoutBtns).toHaveLength(3)
@@ -36,7 +38,7 @@ describe('ToolSidebar', () => {
   it('emits open-image-picker when the image tool is chosen', async () => {
     const store = useCanvasStore()
     const wrapper = mount(ToolSidebar)
-    const imageBtn = wrapper.findAll('.tool-btn')[3]!
+    const imageBtn = wrapper.findAll('.tool-btn')[4]!
     await imageBtn.trigger('click')
     expect(store.activeTool).toBe('image')
     expect(wrapper.emitted('open-image-picker')).toBeTruthy()
