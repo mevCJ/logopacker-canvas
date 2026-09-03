@@ -41,7 +41,13 @@ import {
   type Box,
   type RenderObject,
 } from '@/services/canvas/svgEngine'
-import { fitImageSize } from '@/services/canvas/userTools'
+import { fitImageSize, readFileAsDataUrl, probeImageSize } from '@/services/canvas/userTools'
+import {
+  classifyClipboard,
+  svgIntrinsicSize,
+  svgToDataUrl,
+  type ClipboardPaste,
+} from '@/services/canvas/pasteTools'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -58,6 +64,11 @@ let panStart: { clientX: number; clientY: number; box: Box; moved: boolean } | n
 
 // Held-space forces panning regardless of the active tool.
 const spacePressed = ref(false)
+
+// Last known cursor position over the stage. Used as the drop point for
+// clipboard pastes; falls back to the viewport center when the pointer has
+// never been over the stage.
+let lastPointer: { clientX: number; clientY: number } | null = null
 
 // Drag interaction state for the marquee (select) and shape tools. Points are
 // in canvas coordinates.
@@ -457,6 +468,7 @@ function cancelPen() {
 }
 
 function onStageMouseMove(e: MouseEvent) {
+  lastPointer = { clientX: e.clientX, clientY: e.clientY }
   if (store.activeTool === 'pen' && penPoints) onPenMove(e)
 }
 
@@ -520,6 +532,123 @@ function placeImage(clientX: number, clientY: number) {
   })
   store.selectObjects([obj.id])
   // Tool stays armed; pendingImage kept for easy multiple placement.
+}
+
+// --- Clipboard paste: images, SVG, and text -------------------------------
+// Resolve the canvas point to drop a paste at: the cursor if it's been over the
+// stage, otherwise the center of the current viewport.
+function pasteDropPoint(): { x: number; y: number } | null {
+  if (!renderer) return null
+  if (lastPointer) return renderer.screenToCanvas(lastPointer.clientX, lastPointer.clientY)
+  const vb = renderer.getViewBox()
+  return { x: vb.x + vb.width / 2, y: vb.y + vb.height / 2 }
+}
+
+// Center an object of the given size on `point` and return artboard-local
+// coordinates plus the resolved artboard.
+function centeredPlacement(point: { x: number; y: number }, width: number, height: number) {
+  const artboard = resolveArtboardAtPoint(store.artboards, point)
+  return {
+    artboard,
+    x: point.x - width / 2 - (artboard?.x ?? 0),
+    y: point.y - height / 2 - (artboard?.y ?? 0),
+  }
+}
+
+async function pasteImageFile(file: File, point: { x: number; y: number }) {
+  const href = await readFileAsDataUrl(file)
+  const natural = await probeImageSize(href)
+  const artboard = resolveArtboardAtPoint(store.artboards, point)
+  const size = fitImageSize(
+    { width: natural.width || 300, height: natural.height || 200 },
+    artboard?.width ? artboard.width * 0.9 : 300,
+    artboard?.height ? artboard.height * 0.9 : 300,
+  )
+  const localX = point.x - size.width / 2 - (artboard?.x ?? 0)
+  const localY = point.y - size.height / 2 - (artboard?.y ?? 0)
+  store.snapshot('Paste image')
+  const obj = store.addImage({
+    href,
+    sourceUrl: file.name || '',
+    alt: file.name || '',
+    width: size.width,
+    height: size.height,
+    x: localX,
+    y: localY,
+    artboardId: artboard?.id ?? null,
+  })
+  store.selectObjects([obj.id])
+}
+
+function pasteSvgMarkup(markup: string, point: { x: number; y: number }) {
+  // Embed the SVG as a single image object. Splitting it into individual path
+  // objects re-bases each path onto the same origin, which both loses the
+  // internal layout and (because a path's `d` keeps its absolute viewBox
+  // coordinates) offsets the visible geometry away from the drop point. One
+  // image keeps the artwork intact and drops it exactly under the cursor.
+  const dims = svgIntrinsicSize(markup)
+  const artboard = resolveArtboardAtPoint(store.artboards, point)
+  const size = fitImageSize(
+    dims,
+    artboard?.width ? artboard.width * 0.9 : 300,
+    artboard?.height ? artboard.height * 0.9 : 300,
+  )
+  const localX = point.x - size.width / 2 - (artboard?.x ?? 0)
+  const localY = point.y - size.height / 2 - (artboard?.y ?? 0)
+  store.snapshot('Paste SVG')
+  const obj = store.addImage({
+    href: svgToDataUrl(markup),
+    sourceUrl: '',
+    alt: 'Pasted SVG',
+    width: size.width,
+    height: size.height,
+    x: localX,
+    y: localY,
+    artboardId: artboard?.id ?? null,
+  })
+  store.selectObjects([obj.id])
+}
+
+function pasteText(text: string, point: { x: number; y: number }) {
+  const trimmed = text.replace(/\s+$/, '')
+  const { artboard, x, y } = centeredPlacement(point, 0, 0)
+  store.snapshot('Paste text')
+  const obj = store.addObject({
+    type: 'text',
+    text: trimmed,
+    x,
+    y,
+    artboardId: artboard?.id ?? null,
+    semanticRole: 'bodyText',
+  })
+  store.selectObjects([obj.id])
+}
+
+async function handlePaste(e: ClipboardEvent) {
+  // Don't hijack paste while editing text inline or in any form field.
+  const target = e.target as HTMLElement | null
+  const tag = (target && target.tagName) || ''
+  if (inlineEdit.value || /^(INPUT|TEXTAREA|SELECT)$/.test(tag) || target?.isContentEditable) {
+    return
+  }
+  const result: ClipboardPaste = classifyClipboard(e.clipboardData)
+  if (result.kind === 'none') return
+
+  const point = pasteDropPoint()
+  if (!point) return
+
+  e.preventDefault()
+  try {
+    if (result.kind === 'image') {
+      await pasteImageFile(result.file, point)
+    } else if (result.kind === 'svg') {
+      pasteSvgMarkup(result.markup, point)
+    } else if (result.kind === 'text') {
+      pasteText(result.text, point)
+    }
+  } catch (err) {
+    console.warn('[paste] failed to place clipboard content:', (err as Error)?.message)
+  }
 }
 
 function onObjectDragEnd(id: string, { dx, dy, alt }: { dx: number; dy: number; alt: boolean }) {
@@ -621,6 +750,7 @@ onMounted(() => {
   fitViewBox()
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
+  window.addEventListener('paste', handlePaste)
 })
 
 onBeforeUnmount(() => {
@@ -628,6 +758,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', onMouseUp)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
+  window.removeEventListener('paste', handlePaste)
   if (renderer) renderer.destroy()
   renderer = null
 })

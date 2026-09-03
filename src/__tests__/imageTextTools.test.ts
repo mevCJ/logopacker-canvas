@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useCanvasStore } from '@/stores/canvas'
 import { buildImageTextTools, type ImageTextDeps } from '@/services/canvas/imageTextTools'
+import { buildCanvasTools } from '@/services/canvas/tools'
 import type { WebMcpToolDefinition, WebMcpResult } from '@/services/canvas/webmcp'
 
 function parse(result: WebMcpResult): any {
@@ -19,8 +20,10 @@ describe('WebMCP typography & image tools', () => {
   let ab: any
 
   function build(deps?: ImageTextDeps) {
+    const logger = { step: (l: string) => steps.push(l) }
     const map: Record<string, WebMcpToolDefinition> = {}
-    for (const t of buildImageTextTools(store, { step: (l) => steps.push(l) }, deps)) map[t.name] = t
+    for (const t of buildCanvasTools(store, logger)) map[t.name] = t
+    for (const t of buildImageTextTools(store, logger, deps)) map[t.name] = t
     return map
   }
 
@@ -41,13 +44,27 @@ describe('WebMCP typography & image tools', () => {
     expect(obj.fontSize).toBe(32)
   })
 
-  it('set_typography updates by role and only affects text', async () => {
+  it('set_object_properties updates text typography by role', async () => {
     store.addObject({ type: 'text', artboardId: ab.id, semanticRole: 'headline', text: 'A' })
-    store.addObject({ type: 'path', artboardId: ab.id, semanticRole: 'headline' })
     const tools = build()
-    await tools.set_typography!.execute({ role: 'headline', fontWeight: 700, fill: '#fff' })
+    await tools.set_object_properties!.execute({ role: 'headline', properties: { fontWeight: 700, fill: '#fff' } })
     const texts = store.findByRole('headline').filter((o) => o.type === 'text') as any[]
     expect(texts[0].fontWeight).toBe(700)
+    expect(texts[0].fill).toBe('#fff')
+  })
+
+  it('set_object_properties ignores keys invalid for the object type', async () => {
+    const pathObj = store.addObject({ type: 'path', artboardId: ab.id, semanticRole: 'logoSymbol' })
+    const tools = build()
+    // fontWeight is not a path property; fill is. Only fill should apply.
+    const out = parse((await tools.set_object_properties!.execute({
+      ids: [pathObj.id],
+      properties: { fill: '#123456', fontWeight: 900 },
+    })) as WebMcpResult)
+    const updated = store.getObject(pathObj.id) as any
+    expect(updated.fill).toBe('#123456')
+    expect(updated.fontWeight).toBeUndefined()
+    expect(out.updated[0].applied).toEqual(['fill'])
   })
 
   it('search_pexels returns normalized results via injected fetch', async () => {

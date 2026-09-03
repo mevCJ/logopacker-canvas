@@ -60,6 +60,69 @@ function resolveTargets(store: CanvasStore, { ids, role }: { ids?: string[]; rol
   return []
 }
 
+// Which properties are readable/writable, keyed by object type. This is the
+// single source of truth the generic get/set_object_properties tools use to
+// validate keys, so adding a property to a type here (plus the store) makes it
+// agent-editable without a new tool.
+const COMMON_PROPS = [
+  'x',
+  'y',
+  'width',
+  'height',
+  'rotation',
+  'opacity',
+  'semanticRole',
+  'artboardId',
+] as const
+
+const TYPE_PROPS: Record<string, readonly string[]> = {
+  path: ['d', 'fill', 'stroke', 'strokeWidth', 'cornerRadius'],
+  text: ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align'],
+  image: ['href', 'sourceUrl', 'alt'],
+}
+
+// The set of property names editable for a given object type. `cornerRadius` is
+// only meaningful for rectangle-shaped paths.
+function editableProps(o: CanvasObject): string[] {
+  const typeProps = (TYPE_PROPS[o.type] || []).filter((p) => {
+    if (p === 'cornerRadius') return o.type === 'path' && (o as any).shape === 'rect'
+    return true
+  })
+  return [...COMMON_PROPS, ...typeProps]
+}
+
+// Read the current values of a single object's editable properties.
+function readProps(o: CanvasObject): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const key of editableProps(o)) out[key] = (o as any)[key]
+  return out
+}
+
+// Apply a property patch to one object, keeping only keys valid for its type.
+// cornerRadius routes through setCornerRadius so the path `d` is regenerated;
+// everything else goes through updateObject. Returns the applied keys.
+function applyProps(
+  store: CanvasStore,
+  o: CanvasObject,
+  properties: Record<string, unknown>,
+): string[] {
+  const allowed = new Set(editableProps(o))
+  const patch: Record<string, unknown> = {}
+  const applied: string[] = []
+  for (const [key, value] of Object.entries(properties)) {
+    if (value === undefined || !allowed.has(key)) continue
+    if (key === 'cornerRadius') {
+      store.setCornerRadius(o.id, Number(value))
+      applied.push(key)
+      continue
+    }
+    patch[key] = value
+    applied.push(key)
+  }
+  if (Object.keys(patch).length) store.updateObject(o.id, patch)
+  return applied
+}
+
 export function buildCanvasTools(
   store: CanvasStore,
   logger: ToolLogger = { step() {} },
@@ -125,7 +188,7 @@ export function buildCanvasTools(
     {
       name: 'get_object',
       description:
-        'Returns the full compact view of a single object by id, including path data (d) for path objects.',
+        'Returns a compact human-readable view of a single object by id (type, semanticRole, geometry, style, and path data d for paths). For editing, prefer get_object_properties, which also lists the exact keys you may set.',
       inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       execute({ id }: { id: string }) {
         const o = store.getObject(id)
@@ -135,31 +198,24 @@ export function buildCanvasTools(
         return text(view)
       },
     },
+    // ---- Selection ---------------------------------------------------------
     {
-      name: 'inspect_path',
+      name: 'get_selection',
       description:
-        'Returns the vector path details of a path object: raw path data (d), fill, stroke, strokeWidth, opacity, semanticRole, and position.',
-      inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
-      execute({ id }: { id: string }) {
-        const o = store.getObject(id)
-        if (!o) return text(`No object with id ${id}`)
-        if (o.type !== 'path') return text(`Object ${id} is not a path (type=${o.type}).`)
-        log('Inspected path')
+        'Returns what the human currently has selected on the canvas: the selected object ids and their compact views, or the selected artboard (object and artboard selection are mutually exclusive). Use this to resolve references like "this", "the selected shape", or "make it blue" to concrete object ids.',
+      inputSchema: { type: 'object', properties: {} },
+      execute() {
+        log('Read selection')
+        const objects = store.selectedObjects.map(objView)
+        const artboard = store.selectedArtboard ? artboardView(store.selectedArtboard) : null
         return text({
-          id: o.id,
-          semanticRole: o.semanticRole,
-          d: o.d,
-          fill: o.fill,
-          stroke: o.stroke,
-          strokeWidth: o.strokeWidth,
-          opacity: o.opacity,
-          x: o.x,
-          y: o.y,
+          objectIds: [...store.selectedIds],
+          objects,
+          artboardId: store.selectedArtboardId,
+          artboard,
         })
       },
     },
-
-    // ---- Selection ---------------------------------------------------------
     {
       name: 'select_objects',
       description:
@@ -283,49 +339,60 @@ export function buildCanvasTools(
       },
     },
     {
-      name: 'set_stroke',
-      description: 'Sets the stroke color and/or width of objects, by ids or semanticRole.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          ids: { type: 'array', items: { type: 'string' } },
-          role: { type: 'string' },
-          stroke: { type: 'string' },
-          strokeWidth: { type: 'number' },
-        },
-      },
-      execute({ ids, role, stroke, strokeWidth }: any = {}) {
-        const targets = resolveTargets(store, { ids, role })
-        if (!targets.length) return text('No matching objects for stroke.')
-        targets.forEach((id) => store.setStroke(id, { stroke, strokeWidth }))
-        log(`Set stroke on ${targets.length} object(s)`)
-        return text({ updated: targets, stroke, strokeWidth })
+      name: 'get_object_properties',
+      description:
+        'Returns the current values of every editable property for an object, plus the list of property names you may set for that object type. Call this before set_object_properties so you know which keys are valid. ' +
+        'Common (all types): x, y, width, height, rotation, opacity, semanticRole, artboardId. ' +
+        'path: d, fill, stroke, strokeWidth, cornerRadius (rectangles only). ' +
+        'text: text, fontFamily, fontSize, fontWeight, fill, align. ' +
+        'image: href, sourceUrl, alt.',
+      inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      execute({ id }: { id: string }) {
+        const o = store.getObject(id)
+        if (!o) return text(`No object with id ${id}`)
+        log('Read object properties')
+        return text({ id: o.id, type: o.type, editable: editableProps(o), properties: readProps(o) })
       },
     },
     {
-      name: 'set_opacity',
-      description: 'Sets the opacity (0..1) of objects, by ids or semanticRole.',
+      name: 'set_object_properties',
+      description:
+        'Sets any editable properties on one or more objects, targeted by ids or semanticRole. Pass a `properties` object with the keys to change; only keys valid for each object type are applied (unknown/invalid keys are ignored). Use get_object_properties first to see which keys are valid. ' +
+        'Common (all types): x, y, width, height, rotation, opacity, semanticRole, artboardId. ' +
+        'path: d, fill, stroke, strokeWidth, cornerRadius (rectangles only, regenerates the path). ' +
+        'text: text, fontFamily, fontSize, fontWeight, fill, align. ' +
+        'image: href, sourceUrl, alt.',
       inputSchema: {
         type: 'object',
         properties: {
           ids: { type: 'array', items: { type: 'string' } },
-          role: { type: 'string' },
-          opacity: { type: 'number' },
+          role: { type: 'string', description: 'Semantic role, e.g. logoSymbol.' },
+          properties: {
+            type: 'object',
+            description: 'Property key/value pairs to set. Keys are validated per object type.',
+          },
         },
-        required: ['opacity'],
+        required: ['properties'],
       },
-      execute({ ids, role, opacity }: { ids?: string[]; role?: string; opacity: number }) {
+      execute({ ids, role, properties }: { ids?: string[]; role?: string; properties?: Record<string, unknown> } = {}) {
         const targets = resolveTargets(store, { ids, role })
-        if (!targets.length) return text('No matching objects for opacity.')
-        targets.forEach((id) => store.setOpacity(id, opacity))
-        log(`Set opacity ${opacity} on ${targets.length} object(s)`)
-        return text({ updated: targets, opacity })
+        if (!targets.length) return text('No matching objects.')
+        if (!properties || typeof properties !== 'object') return text('Provide a `properties` object.')
+        const results: Array<{ id: string; applied: string[] }> = []
+        for (const id of targets) {
+          const o = store.getObject(id)
+          if (!o) continue
+          results.push({ id, applied: applyProps(store, o, properties) })
+        }
+        const keys = [...new Set(results.flatMap((r) => r.applied))]
+        log(`Set ${keys.join(', ') || 'no'} propert${keys.length === 1 ? 'y' : 'ies'} on ${results.length} object(s)`)
+        return text({ updated: results })
       },
     },
     {
       name: 'set_path_data',
       description:
-        'Replaces the vector path data (d attribute) of a path object. Use inspect_path first to read the current d.',
+        'Replaces the vector path data (d attribute) of a path object. Use get_object first to read the current d.',
       inputSchema: {
         type: 'object',
         properties: { id: { type: 'string' }, d: { type: 'string', description: 'New SVG path data.' } },
@@ -373,61 +440,6 @@ export function buildCanvasTools(
     },
 
     // ---- Composite design helpers -----------------------------------------
-    {
-      name: 'recolor_role',
-      description:
-        'Recolors all objects of a semantic role to a single fill (e.g. recolor both logoSymbol and wordmark to black).',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          roles: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'One or more semantic roles, e.g. ["logoSymbol","wordmark"].',
-          },
-          fill: { type: 'string' },
-        },
-        required: ['roles', 'fill'],
-      },
-      execute({ roles = [], fill }: { roles?: string[]; fill: string }) {
-        let count = 0
-        for (const role of roles) {
-          for (const o of store.findByRole(role)) {
-            if (o.type !== 'image') {
-              store.setFill(o.id, fill)
-              count += 1
-            }
-          }
-        }
-        log(`Recolored ${count} object(s) to ${fill}`)
-        return text({ recolored: count, fill })
-      },
-    },
-    {
-      name: 'copy_role_to_artboard',
-      description:
-        'Copies every object of a semantic role into a target artboard (preserving local position), optionally recoloring. Ideal for building logo variations like Black Logo or White Logo.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          role: { type: 'string' },
-          targetArtboardId: { type: 'string' },
-          sourceArtboardId: {
-            type: 'string',
-            description:
-              'Optional: only copy objects of this role from this source artboard (e.g. the Primary Logo). Recommended to avoid copying earlier variations.',
-          },
-          recolorFill: { type: 'string' },
-        },
-        required: ['role', 'targetArtboardId'],
-      },
-      execute({ role, targetArtboardId, sourceArtboardId, recolorFill }: any = {}) {
-        if (!store.getArtboard(targetArtboardId)) return text('Target artboard not found.')
-        const ids = store.copyRoleToArtboard(role, targetArtboardId, { recolorFill, sourceArtboardId })
-        log(`Copied ${role} to artboard`)
-        return text({ ids })
-      },
-    },
     {
       name: 'center_object',
       description:

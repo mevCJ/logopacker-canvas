@@ -51,8 +51,8 @@ describe('WebMCP canvas & object tools', () => {
     expect(steps).toContain('Inspected canvas')
   })
 
-  it('inspect_path exposes d + style', async () => {
-    const out = parse((await tools.inspect_path!.execute({ id: symbol.id })) as WebMcpResult)
+  it('get_object exposes path d + style', async () => {
+    const out = parse((await tools.get_object!.execute({ id: symbol.id })) as WebMcpResult)
     expect(out.d).toBe('M0 0 L10 10 Z')
     expect(out.fill).toBe('#3754FA')
   })
@@ -60,6 +60,24 @@ describe('WebMCP canvas & object tools', () => {
   it('select_objects by role', async () => {
     await tools.select_objects!.execute({ role: 'wordmark' })
     expect(store.selectedIds).toEqual([wordmark.id])
+  })
+
+  it('get_selection returns the human’s current object selection', async () => {
+    store.selectObjects([symbol.id])
+    const out = parse((await tools.get_selection!.execute({})) as WebMcpResult)
+    expect(out.objectIds).toEqual([symbol.id])
+    expect(out.objects).toHaveLength(1)
+    expect(out.objects[0].id).toBe(symbol.id)
+    expect(out.objects[0].semanticRole).toBe('logoSymbol')
+    expect(out.artboard).toBeNull()
+  })
+
+  it('get_selection reports a selected artboard (mutually exclusive with objects)', async () => {
+    store.selectArtboard(ab.id)
+    const out = parse((await tools.get_selection!.execute({})) as WebMcpResult)
+    expect(out.objectIds).toEqual([])
+    expect(out.artboardId).toBe(ab.id)
+    expect(out.artboard.name).toBe('Primary Logo')
   })
 
   it('set_fill by role recolors the whole logo', async () => {

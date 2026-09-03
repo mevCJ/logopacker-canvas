@@ -70,38 +70,8 @@ export function buildImageTextTools(
         return text({ id: obj.id, artboardId: obj.artboardId })
       },
     },
-    {
-      name: 'set_typography',
-      description:
-        'Updates typography of one or more text objects (by ids or semanticRole): fontFamily, fontSize, fontWeight, fill, align, and/or text content.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          ids: { type: 'array', items: { type: 'string' } },
-          role: { type: 'string' },
-          text: { type: 'string' },
-          fontFamily: { type: 'string' },
-          fontSize: { type: 'number' },
-          fontWeight: { type: 'number' },
-          fill: { type: 'string' },
-          align: { type: 'string', enum: ['left', 'center', 'right'] },
-        },
-      },
-      execute({ ids, role, ...typography }: any = {}) {
-        let targets: string[] = []
-        if (Array.isArray(ids) && ids.length) targets = ids.filter((id: string) => store.getObject(id))
-        else if (role) targets = store.findByRole(role).map((o) => o.id)
-        targets = targets.filter((id) => store.getObject(id)?.type === 'text')
-        if (!targets.length) return text('No matching text objects.')
-        const patch: Record<string, unknown> = {}
-        for (const k of ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align']) {
-          if (typography[k] !== undefined) patch[k] = typography[k]
-        }
-        targets.forEach((id) => store.updateObject(id, patch))
-        log(`Updated typography on ${targets.length} text object(s)`)
-        return text({ updated: targets, patch })
-      },
-    },
+    // Typography edits (fontFamily, fontSize, fontWeight, fill, align, text) are
+    // handled by the generic set_object_properties tool in tools.ts.
 
     // ---- Images ------------------------------------------------------------
     {
@@ -159,27 +129,7 @@ export function buildImageTextTools(
         return text({ id: img.id, artboardId: img.artboardId })
       },
     },
-    {
-      name: 'position_image',
-      description: 'Positions and/or resizes an image (or any object) by id.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          x: { type: 'number' },
-          y: { type: 'number' },
-          width: { type: 'number' },
-          height: { type: 'number' },
-        },
-        required: ['id'],
-      },
-      execute({ id, x, y, width, height }: any = {}) {
-        const o = store.getObject(id)
-        if (!o) return text(`No object with id ${id}`)
-        store.positionImage(id, { x, y, width, height })
-        log('Positioned image')
-        return text({ id, x, y, width, height })
-      },
-    },
+    // Positioning/resizing an image (x, y, width, height) is handled by the
+    // generic set_object_properties tool in tools.ts.
   ]
 }

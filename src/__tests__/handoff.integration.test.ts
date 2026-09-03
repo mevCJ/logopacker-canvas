@@ -52,31 +52,34 @@ describe('logo handoff — full orchestration integration', () => {
     expect(store.findByRole('logoSymbol')).toHaveLength(1)
     expect(store.findByRole('wordmark')).toHaveLength(1)
 
-    await tools.begin_agent_request!.execute({ title: 'Create logo handoff package' })
+    // Request bracketing (undo grouping + activity group) is a store concern.
+    store.beginGroup('Create logo handoff package')
+    store.beginActivityGroup('Create logo handoff package')
     expect(store.currentGroup).not.toBeNull()
 
     await tools.inspect_canvas!.execute({})
 
     const black = parse((await tools.create_artboard!.execute({ name: 'Black Logo', width: 400, height: 300 })) as WebMcpResult).artboard
-    await tools.copy_role_to_artboard!.execute({ role: 'logoSymbol', targetArtboardId: black.id, sourceArtboardId: primaryId, recolorFill: '#000000' })
-    await tools.copy_role_to_artboard!.execute({ role: 'wordmark', targetArtboardId: black.id, sourceArtboardId: primaryId, recolorFill: '#000000' })
+    store.copyRoleToArtboard('logoSymbol', black.id, { sourceArtboardId: primaryId, recolorFill: '#000000' })
+    store.copyRoleToArtboard('wordmark', black.id, { sourceArtboardId: primaryId, recolorFill: '#000000' })
 
     const white = parse((await tools.create_artboard!.execute({ name: 'White Logo', width: 400, height: 300, backgroundColor: '#111111' })) as WebMcpResult).artboard
-    await tools.copy_role_to_artboard!.execute({ role: 'logoSymbol', targetArtboardId: white.id, sourceArtboardId: primaryId, recolorFill: '#FFFFFF' })
-    await tools.copy_role_to_artboard!.execute({ role: 'wordmark', targetArtboardId: white.id, sourceArtboardId: primaryId, recolorFill: '#FFFFFF' })
+    store.copyRoleToArtboard('logoSymbol', white.id, { sourceArtboardId: primaryId, recolorFill: '#FFFFFF' })
+    store.copyRoleToArtboard('wordmark', white.id, { sourceArtboardId: primaryId, recolorFill: '#FFFFFF' })
 
     const symbolOnly = parse((await tools.create_artboard!.execute({ name: 'Symbol Only', width: 300, height: 300 })) as WebMcpResult).artboard
-    await tools.copy_role_to_artboard!.execute({ role: 'logoSymbol', targetArtboardId: symbolOnly.id, sourceArtboardId: primaryId })
+    store.copyRoleToArtboard('logoSymbol', symbolOnly.id, { sourceArtboardId: primaryId })
 
     const social = parse((await tools.create_artboard!.execute({ name: 'Social Card', width: 600, height: 600, backgroundColor: '#F4F4F5' })) as WebMcpResult).artboard
     const search = parse((await tools.search_pexels!.execute({ query: 'minimal architecture', perPage: 3 })) as WebMcpResult)
     expect(search.results.length).toBeGreaterThan(0)
     const chosen = search.results[0]
     await tools.add_image!.execute({ artboardId: social.id, src: chosen.src, alt: chosen.alt, x: 0, y: 0, width: 600, height: 320, semanticRole: 'heroImage' })
-    await tools.copy_role_to_artboard!.execute({ role: 'logoSymbol', targetArtboardId: social.id, sourceArtboardId: primaryId })
+    store.copyRoleToArtboard('logoSymbol', social.id, { sourceArtboardId: primaryId })
     await tools.add_text!.execute({ text: 'Built for what’s next', artboardId: social.id, x: 40, y: 420, fontSize: 40, fontWeight: 700, semanticRole: 'headline' })
 
-    await tools.end_agent_request!.execute({ arrange: true, columns: 3 })
+    store.arrangeArtboards({ columns: 3 })
+    store.endActivityGroup({ status: 'done' })
 
     const names = store.artboards.map((a) => a.name)
     expect(names).toEqual(['Primary Logo', 'Black Logo', 'White Logo', 'Symbol Only', 'Social Card'])
@@ -103,10 +106,12 @@ describe('logo handoff — full orchestration integration', () => {
     expect(store.findByRole('logoSymbol')).toHaveLength(1)
   })
 
-  it('example prompt: make the logo monochrome (recolor_role) undoes as one action', async () => {
-    await tools.begin_agent_request!.execute({ title: 'Make logo monochrome' })
-    await tools.recolor_role!.execute({ roles: ['logoSymbol', 'wordmark'], fill: '#111111' })
-    await tools.end_agent_request!.execute({})
+  it('make the logo monochrome via set_fill undoes as one action', async () => {
+    store.beginGroup('Make logo monochrome')
+    store.beginActivityGroup('Make logo monochrome')
+    await tools.set_fill!.execute({ role: 'logoSymbol', fill: '#111111' })
+    await tools.set_fill!.execute({ role: 'wordmark', fill: '#111111' })
+    store.endActivityGroup({ status: 'done' })
     expect((store.findByRole('logoSymbol')[0] as any).fill).toBe('#111111')
     store.undo()
     expect((store.findByRole('logoSymbol')[0] as any).fill).toBe('#3754FA')
