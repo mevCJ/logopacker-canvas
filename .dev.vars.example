@@ -1,0 +1,3 @@
+# Local development secrets for `wrangler dev` (copy to .dev.vars and fill in).
+# For production, set via: wrangler secret put PEXELS_API_KEY
+PEXELS_API_KEY=your-pexels-api-key
