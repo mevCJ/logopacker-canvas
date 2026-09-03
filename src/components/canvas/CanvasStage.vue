@@ -522,11 +522,18 @@ function placeImage(clientX: number, clientY: number) {
   // Tool stays armed; pendingImage kept for easy multiple placement.
 }
 
-function onObjectDragEnd(id: string, { dx, dy }: { dx: number; dy: number }) {
+function onObjectDragEnd(id: string, { dx, dy, alt }: { dx: number; dy: number; alt: boolean }) {
   // Only the select tool moves objects; creation tools ignore object drags.
   if (store.activeTool !== 'select') return
   const obj = store.getObject(id)
   if (!obj) return
+  // Alt-drag leaves the original in place and drops a copy at the drag offset.
+  if (alt) {
+    store.snapshot('Duplicate')
+    const dup = store.duplicateObject(id, { x: dx, y: dy })
+    if (dup) store.selectObjects([dup.id])
+    return
+  }
   store.snapshot('Move')
   store.moveObject(id, { x: (obj.x || 0) + dx, y: (obj.y || 0) + dy })
   if (!store.selectedIds.includes(id)) store.selectObjects([id])

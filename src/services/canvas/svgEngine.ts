@@ -611,7 +611,10 @@ export function documentBounds(artboards: RenderArtboard[] | undefined, padding 
 // ---------------------------------------------------------------------------
 
 export type ObjectMountedHook = (obj: RenderObject, el: SvgEl) => void
-export type DragEndHook = (id: string, delta: { dx: number; dy: number }) => void
+export type DragEndHook = (
+  id: string,
+  delta: { dx: number; dy: number; alt: boolean },
+) => void
 export type ResizeHook = (
   id: string,
   box: { x: number; y: number; width: number; height: number },
@@ -1326,7 +1329,8 @@ export class CanvasRenderer {
     })
     el.on('dragend', (e: CustomEvent) => {
       clearGhost()
-      const endBox = (e.detail as { box: { x: number; y: number } }).box
+      const detail = e.detail as { box: { x: number; y: number }; event?: MouseEvent }
+      const endBox = detail.box
       if (!startBox) return
       const dx = endBox.x - startBox.x
       const dy = endBox.y - startBox.y
@@ -1334,7 +1338,7 @@ export class CanvasRenderer {
       if ((dx === 0 && dy === 0) || typeof this.onObjectDragEnd !== 'function') {
         return
       }
-      this.onObjectDragEnd(obj.id, { dx, dy })
+      this.onObjectDragEnd(obj.id, { dx, dy, alt: !!detail.event?.altKey })
     })
   }
 
