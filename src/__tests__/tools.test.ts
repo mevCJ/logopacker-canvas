@@ -96,6 +96,63 @@ describe('WebMCP canvas & object tools', () => {
     const out = parse((await tools.get_object!.execute({ id: 'nope' })) as WebMcpResult)
     expect(out).toMatch(/No object/)
   })
+
+  it('fit_artboard_to_artwork resizes the artboard to wrap its objects', async () => {
+    // Reposition the two seeded paths (each 100×100 by default) so their union
+    // bounds are known: symbol at (10,20), wordmark at (60,90) -> union
+    // top-left (10,20), bottom-right (160,190) => 150×170 at local (10,20).
+    store.moveObject(symbol.id, { x: 10, y: 20 })
+    store.moveObject(wordmark.id, { x: 60, y: 90 })
+
+    const out = parse((await tools.fit_artboard_to_artwork!.execute({ artboardId: ab.id })) as WebMcpResult)
+    expect(out.artboard.width).toBe(150)
+    expect(out.artboard.height).toBe(170)
+    // Artboard moved to the artwork origin; objects rebased to keep place.
+    expect(out.artboard.x).toBe(10)
+    expect(out.artboard.y).toBe(20)
+    expect((store.getObject(symbol.id) as any).x).toBe(0)
+    expect((store.getObject(symbol.id) as any).y).toBe(0)
+    expect(steps.some((s) => /Fit artboard/.test(s))).toBe(true)
+  })
+
+  it('fit_artboard_to_artwork reports when the artboard is empty', async () => {
+    const empty = store.addArtboard({ name: 'Empty', width: 300, height: 300 })
+    const out = parse((await tools.fit_artboard_to_artwork!.execute({ artboardId: empty.id })) as WebMcpResult)
+    expect(out).toMatch(/no artwork/i)
+  })
+
+  it('fit_artboard_to_artwork reports an unknown artboard', async () => {
+    const out = parse((await tools.fit_artboard_to_artwork!.execute({ artboardId: 'nope' })) as WebMcpResult)
+    expect(out).toMatch(/No artboard/)
+  })
+
+  it('reparent_object moves an object to another artboard, keeping it in place', async () => {
+    const b = store.addArtboard({ name: 'Secondary', x: 500, y: 100, width: 400, height: 300 })
+    store.moveObject(symbol.id, { x: 50, y: 60 }) // local in ab (origin 0,0) -> abs (50,60)
+
+    const out = parse((await tools.reparent_object!.execute({ id: symbol.id, artboardId: b.id })) as WebMcpResult)
+    expect(out.artboardId).toBe(b.id)
+    // Rebased to b origin (500,100): (50-500, 60-100) = (-450, -40).
+    expect(out.x).toBe(-450)
+    expect(out.y).toBe(-40)
+    expect(store.getArtboard(ab.id)!.objectIds).not.toContain(symbol.id)
+    expect(store.getArtboard(b.id)!.objectIds).toContain(symbol.id)
+  })
+
+  it('reparent_object rejects an unknown target artboard', async () => {
+    const out = parse((await tools.reparent_object!.execute({ id: symbol.id, artboardId: 'nope' })) as WebMcpResult)
+    expect(out).toMatch(/No artboard/)
+    // Unchanged.
+    expect((store.getObject(symbol.id) as any).artboardId).toBe(ab.id)
+  })
+
+  it('reparent_object can detach an object to the canvas (artboardId null)', async () => {
+    store.moveObject(symbol.id, { x: 5, y: 7 })
+    const out = parse((await tools.reparent_object!.execute({ id: symbol.id, artboardId: null })) as WebMcpResult)
+    expect(out.artboardId).toBeNull()
+    // ab origin is (0,0) so coords are unchanged, just detached.
+    expect(store.getArtboard(ab.id)!.objectIds).not.toContain(symbol.id)
+  })
 })
 
 describe('registerCanvasTools — WebMCP registration wiring', () => {

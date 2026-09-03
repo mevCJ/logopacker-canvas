@@ -2,7 +2,8 @@
 // SVG.js renders/syncs from this; both human interactions and WebMCP tools
 // mutate this state.
 import { defineStore } from 'pinia'
-import { rectPathData } from '@/services/canvas/svgEngine'
+import { rectPathData, rotatePoint, nodesToPathData, nodesBounds } from '@/services/canvas/svgEngine'
+import type { Box, PathNode } from '@/services/canvas/svgEngine'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -25,7 +26,7 @@ export type ObjectType = (typeof OBJECT_TYPES)[number]
 
 // User-facing canvas tools (the floating tool sidebar). 'select' is the idle
 // default; the others arm a creation mode until the user switches back.
-export const TOOL_IDS = ['select', 'text', 'pen', 'rect', 'ellipse', 'line', 'image'] as const
+export const TOOL_IDS = ['select', 'node', 'text', 'pen', 'rect', 'ellipse', 'line', 'image'] as const
 export type ToolId = (typeof TOOL_IDS)[number]
 
 // A staged image chosen (uploaded or picked from Pexels) but not yet placed.
@@ -90,6 +91,12 @@ export interface PathObject extends BaseObject {
   fill: string
   stroke: string
   strokeWidth: number
+  // Editable Bézier anchors (local/base frame), the source of truth for
+  // pen-drawn paths. When present, `d` is derived from these; the node-edit
+  // tool reshapes the path by mutating them. Absent for shapes/imported paths.
+  nodes?: PathNode[]
+  // Whether the node path is closed (last anchor connects back to the first).
+  closed?: boolean
   // Optional primitive discriminator for shapes drawn by the shape tool. Lets
   // the UI offer shape-specific controls (e.g. rectangle corner radius).
   shape?: 'rect' | 'ellipse' | 'line'
@@ -217,6 +224,25 @@ function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
     if (obj[k] !== undefined) out[k] = obj[k]
   }
   return out as Partial<T>
+}
+
+// ---------------------------------------------------------------------------
+// Geometry measurement hook
+// ---------------------------------------------------------------------------
+// The store holds nominal object dimensions, but for paths/text the actual
+// rendered geometry can differ (seeded/imported paths default to 100×100 and
+// their `d` may start off-origin). The renderer knows the true bbox, so it can
+// register a measurement function here. `fitArtboardToArtwork` uses it when
+// present and falls back to stored dims otherwise (e.g. in tests without a DOM).
+// The box returned is absolute canvas-space bounds in the object's UN-rotated
+// frame; rotation is applied by the caller about the box center.
+
+export type ObjectBoxMeasurer = (obj: CanvasObject) => Box | null
+
+let measureObjectBox: ObjectBoxMeasurer | null = null
+
+export function setObjectBoxMeasurer(fn: ObjectBoxMeasurer | null): void {
+  measureObjectBox = fn
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +377,73 @@ export const useCanvasStore = defineStore('canvas', {
       return true
     },
 
+    // Resize (and reposition) an artboard so it tightly wraps the artwork it
+    // contains. Object x/y are stored relative to the artboard, so we compute
+    // the artwork's axis-aligned bounds in that local space (accounting for each
+    // object's rotation about its own center), then shrink/move the artboard to
+    // match. Objects are offset by the inverse so they stay put in canvas space.
+    // No-op (returns null) for an empty artboard. `padding` insets a uniform
+    // margin of blank space around the artwork on all sides.
+    fitArtboardToArtwork(id: string, { padding = 0 }: { padding?: number } = {}): Artboard | null {
+      const artboard = this.getArtboard(id)
+      if (!artboard) return null
+
+      const objs = artboard.objectIds
+        .map((oid) => this.objects[oid])
+        .filter((o): o is CanvasObject => !!o)
+      if (objs.length === 0) return null
+
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+
+      for (const o of objs) {
+        // Prefer the renderer's measured bounds (true rendered extent). Those
+        // are absolute canvas-space; convert to artboard-local by removing the
+        // artboard origin. Fall back to the object's stored local box.
+        const measured = measureObjectBox ? measureObjectBox(o) : null
+        const localX = measured ? measured.x - artboard.x : o.x || 0
+        const localY = measured ? measured.y - artboard.y : o.y || 0
+        const w = measured ? measured.width : o.width || 0
+        const h = measured ? measured.height : o.height || 0
+
+        const center = { x: localX + w / 2, y: localY + h / 2 }
+        const rot = o.rotation || 0
+        const corners = [
+          { x: localX, y: localY },
+          { x: localX + w, y: localY },
+          { x: localX + w, y: localY + h },
+          { x: localX, y: localY + h },
+        ].map((p) => (rot ? rotatePoint(center, p, rot) : p))
+        for (const p of corners) {
+          minX = Math.min(minX, p.x)
+          minY = Math.min(minY, p.y)
+          maxX = Math.max(maxX, p.x)
+          maxY = Math.max(maxY, p.y)
+        }
+      }
+
+      const pad = Math.max(0, padding)
+      const boxX = minX - pad
+      const boxY = minY - pad
+      const width = Math.max(1, maxX - minX + pad * 2)
+      const height = Math.max(1, maxY - minY + pad * 2)
+
+      // Move the artboard to the artwork's location and shift objects back by
+      // the same amount so they don't visually move on the canvas.
+      artboard.x += boxX
+      artboard.y += boxY
+      artboard.width = width
+      artboard.height = height
+      for (const o of objs) {
+        o.x = (o.x || 0) - boxX
+        o.y = (o.y || 0) - boxY
+      }
+
+      return artboard
+    },
+
     // ---- Objects -----------------------------------------------------------
     addObject(payload: AddObjectPayload = {}): CanvasObject {
       const type: ObjectType = (payload.type as ObjectType) || 'path'
@@ -479,6 +572,34 @@ export const useCanvasStore = defineStore('canvas', {
       return obj
     },
 
+    // Move an object to a different artboard while keeping it visually in place.
+    // Object x/y are stored relative to their artboard, so switching artboards
+    // must rebase them by the difference in artboard origins. No-op when the
+    // target is the object's current artboard. Passing null detaches it to the
+    // canvas (origin 0,0), converting its coordinates to absolute canvas space.
+    reparentObject(id: string, artboardId: string | null): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj) return null
+      if (obj.artboardId === artboardId) return obj
+
+      const prev = obj.artboardId ? this.getArtboard(obj.artboardId) : null
+      const next = artboardId ? this.getArtboard(artboardId) : null
+      // Ignore a requested move to an artboard id that doesn't exist.
+      if (artboardId && !next) return obj
+
+      const prevX = prev ? prev.x : 0
+      const prevY = prev ? prev.y : 0
+      const nextX = next ? next.x : 0
+      const nextY = next ? next.y : 0
+
+      // absolute = artboardOrigin + local; keep absolute constant across move.
+      obj.x = (obj.x || 0) + prevX - nextX
+      obj.y = (obj.y || 0) + prevY - nextY
+
+      this.assignToArtboard(id, artboardId)
+      return obj
+    },
+
     // Add an image object to an artboard.
     addImage(payload: Record<string, any> = {}): CanvasObject {
       const href = payload.href || payload.src || payload.thumb || ''
@@ -549,6 +670,26 @@ export const useCanvasStore = defineStore('canvas', {
       const obj = this.objects[id]
       if (!obj || obj.type !== 'path') return null
       obj.d = d
+      return obj
+    },
+
+    // Replace a path's Bézier nodes (in the object's local/base frame) and
+    // regenerate `d`. Keeps the object origin fixed (the node-edit tool works in
+    // place); width/height/base are resynced from the node bounds so the
+    // renderer's display->base scale stays 1:1 while editing. No-op for a
+    // non-path or a path without a node model.
+    updatePathNodes(id: string, nodes: PathNode[]): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj || obj.type !== 'path') return null
+      const b = nodesBounds(nodes)
+      obj.nodes = nodes
+      obj.d = nodesToPathData(nodes, !!obj.closed)
+      // Bounds drive the selection box + resize scale; the node coords are kept
+      // in the existing frame (may extend past the origin), so d stays aligned.
+      obj.width = b.width
+      obj.height = b.height
+      obj.baseWidth = b.width
+      obj.baseHeight = b.height
       return obj
     },
 

@@ -25,7 +25,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useCanvasStore, type ToolId } from '@/stores/canvas'
+import { useCanvasStore, setObjectBoxMeasurer, type ToolId } from '@/stores/canvas'
 import {
   CanvasRenderer,
   documentBounds,
@@ -34,11 +34,13 @@ import {
   clampZoom,
   normalizeDragBox,
   resolveArtboardAtPoint,
+  artboardAtPoint,
   mergeMarqueeSelection,
   buildShapePayload,
-  buildPenPayload,
+  buildPenNodesPayload,
   canvasPointToScreenRect,
   type Box,
+  type PathNode,
   type RenderObject,
 } from '@/services/canvas/svgEngine'
 import { fitImageSize, readFileAsDataUrl, probeImageSize } from '@/services/canvas/userTools'
@@ -87,11 +89,16 @@ function isShapeTool(t: string): t is ShapeTool {
   return (SHAPE_TOOLS as readonly string[]).includes(t)
 }
 
-// Pen tool state: an in-progress list of anchor points (canvas coords) built
-// up by successive clicks. `null` means no path is being drawn. Clicking near
-// the first anchor closes the path; double-click / Enter finishes an open one.
-let penPoints: { x: number; y: number }[] | null = null
-// Close threshold in screen pixels (converted to canvas units at click time).
+// Pen tool state: the committed anchors of the in-progress path (canvas
+// coords). `null` means no path is being drawn. A click adds a corner anchor;
+// a press-drag pulls symmetric Bézier handles for a smooth anchor. Clicking
+// near the first anchor closes the path; double-click / Enter finishes it.
+let penNodes: PathNode[] | null = null
+// The anchor currently being placed by the active mousedown, with the live
+// drag position that shapes its handles. Committed to penNodes on mouseup.
+let penDraft: { anchor: { x: number; y: number }; drag: { x: number; y: number }; moved: boolean } | null =
+  null
+// Close threshold in screen pixels (converted to canvas units at use time).
 const PEN_CLOSE_PX = 12
 
 // Inline text editing overlay state.
@@ -216,10 +223,10 @@ function fitViewBox() {
 // --- Interaction: object selection wiring ---------------------------------
 function wireObject(obj: RenderObject, el: any) {
   el.node.addEventListener('mousedown', (e: MouseEvent) => {
-    // Only the select tool (and not while space-panning) selects objects on
-    // click. With a creation tool active, let the event bubble to the stage so
-    // the tool can draw/place over existing objects.
-    if (store.activeTool !== 'select' || spacePressed.value) return
+    // The select and node-edit tools select objects on click (not while
+    // space-panning). With a creation tool active, let the event bubble to the
+    // stage so the tool can draw/place over existing objects.
+    if ((store.activeTool !== 'select' && store.activeTool !== 'node') || spacePressed.value) return
     e.stopPropagation()
     const additive = e.shiftKey
     if (additive) {
@@ -280,7 +287,17 @@ function onMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
 
   const tool = store.activeTool
-  const wantPan = spacePressed.value || tool === 'image' || tool === 'text' || tool === 'pen'
+
+  // Pen has its own press-drag-release cycle: press places an anchor, dragging
+  // pulls its Bézier handles, release commits it. Space still forces panning.
+  if (tool === 'pen' && !spacePressed.value) {
+    penMouseDown(e.clientX, e.clientY)
+    window.addEventListener('mousemove', onPenDragMove)
+    window.addEventListener('mouseup', onPenDragUp)
+    return
+  }
+
+  const wantPan = spacePressed.value || tool === 'image' || tool === 'text'
 
   if (!wantPan && (tool === 'select' || isShapeTool(tool))) {
     const p = renderer.screenToCanvas(e.clientX, e.clientY)
@@ -392,14 +409,13 @@ function handleEmptyClick(e: MouseEvent) {
     placeImage(e.clientX, e.clientY)
     return
   }
-  if (tool === 'pen') {
-    penClick(e.clientX, e.clientY)
-    return
-  }
   store.clearSelection()
 }
 
-// --- Pen tool: multi-click polygonal path builder ------------------------
+// --- Pen tool: Bézier path builder ---------------------------------------
+// Click for a corner anchor; press-drag to pull symmetric tangent handles for
+// a smooth anchor. Close by clicking near the first anchor; finish an open path
+// with double-click / Enter; cancel with Escape.
 function penDistanceThreshold(): number {
   // Convert the screen-pixel close radius to canvas units at current zoom.
   if (!renderer || !mount.value) return PEN_CLOSE_PX
@@ -409,52 +425,92 @@ function penDistanceThreshold(): number {
   return PEN_CLOSE_PX * perPx
 }
 
-function penClick(clientX: number, clientY: number) {
-  if (!renderer) return
-  const p = renderer.screenToCanvas(clientX, clientY)
-  if (!penPoints) {
-    penPoints = [p]
-  } else {
-    const first = penPoints[0]!
-    const dx = p.x - first.x
-    const dy = p.y - first.y
-    const near = Math.hypot(dx, dy) <= penDistanceThreshold()
-    if (near && penPoints.length >= 3) {
-      finishPen(true)
-      return
-    }
-    penPoints.push(p)
-  }
-  renderer.showPenPreview(penPoints, null, false)
+// Is the given canvas point within the close radius of the first anchor (and is
+// the path long enough to close)?
+function penNearStart(p: { x: number; y: number }): boolean {
+  if (!penNodes || penNodes.length < 2) return false
+  const first = penNodes[0]!
+  return Math.hypot(p.x - first.x, p.y - first.y) <= penDistanceThreshold()
 }
 
-// Live rubber-band segment from the last anchor to the cursor.
-function onPenMove(e: MouseEvent) {
-  if (!renderer || !penPoints || !penPoints.length) return
-  const cursor = renderer.screenToCanvas(e.clientX, e.clientY)
-  const first = penPoints[0]!
-  const near =
-    penPoints.length >= 3 &&
-    Math.hypot(cursor.x - first.x, cursor.y - first.y) <= penDistanceThreshold()
-  renderer.showPenPreview(penPoints, cursor, near)
+function penMouseDown(clientX: number, clientY: number) {
+  if (!renderer) return
+  const p = renderer.screenToCanvas(clientX, clientY)
+  // Clicking near the first anchor of a 2+ node path closes it.
+  if (penNearStart(p) && penNodes && penNodes.length >= 2) {
+    finishPen(true)
+    return
+  }
+  penDraft = { anchor: p, drag: p, moved: false }
+}
+
+// While the mouse is down on a fresh anchor, dragging shapes its handles.
+function onPenDragMove(e: MouseEvent) {
+  if (!renderer || !penDraft) return
+  penDraft.drag = renderer.screenToCanvas(e.clientX, e.clientY)
+  const d = penDraft.drag
+  if (Math.hypot(d.x - penDraft.anchor.x, d.y - penDraft.anchor.y) > 2) penDraft.moved = true
+  renderPenPreview(draftNode())
+}
+
+function onPenDragUp() {
+  window.removeEventListener('mousemove', onPenDragMove)
+  window.removeEventListener('mouseup', onPenDragUp)
+  if (!penDraft) return
+  const node = draftNode()
+  penDraft = null
+  if (!penNodes) penNodes = []
+  penNodes.push(node)
+  renderPenPreview(null)
+}
+
+// Build the PathNode for the current draft: a corner when undragged, else a
+// smooth anchor whose out handle is the drag point and in handle its mirror.
+function draftNode(): PathNode {
+  const { anchor, drag, moved } = penDraft!
+  if (!moved) return { x: anchor.x, y: anchor.y }
+  return {
+    x: anchor.x,
+    y: anchor.y,
+    outX: drag.x,
+    outY: drag.y,
+    inX: anchor.x - (drag.x - anchor.x),
+    inY: anchor.y - (drag.y - anchor.y),
+  }
+}
+
+// Draw the committed anchors plus, optionally, the anchor being dragged.
+function renderPenPreview(draft: PathNode | null) {
+  if (!renderer) return
+  const nodes = [...(penNodes || [])]
+  if (draft) nodes.push(draft)
+  renderer.showPenPreview(nodes, penNearStart(penDraftPoint()))
+}
+
+// The live cursor/anchor point used for the close-affordance highlight.
+function penDraftPoint(): { x: number; y: number } {
+  if (penDraft) return penDraft.anchor
+  const n = penNodes && penNodes[penNodes.length - 1]
+  return n ? { x: n.x, y: n.y } : { x: 0, y: 0 }
 }
 
 // Commit the in-progress pen path as a path object, or discard if too short.
 function finishPen(closed: boolean) {
-  const points = penPoints
-  penPoints = null
+  const nodes = penNodes
+  penNodes = null
+  penDraft = null
   if (renderer) renderer.hidePenPreview()
-  if (!points || points.length < 2) return
-  // A double-click fires a click (adding an anchor) immediately before it, so
-  // drop a duplicated trailing point to avoid a zero-length final segment.
-  if (points.length >= 2) {
-    const a = points[points.length - 1]!
-    const b = points[points.length - 2]!
-    if (a.x === b.x && a.y === b.y) points.pop()
+  if (!nodes || nodes.length < 2) return
+  // A double-click's first click commits an anchor immediately before finishing,
+  // duplicating the last one; drop a coincident trailing corner node.
+  if (nodes.length >= 2) {
+    const a = nodes[nodes.length - 1]!
+    const b = nodes[nodes.length - 2]!
+    if (a.x === b.x && a.y === b.y && a.outX === undefined && a.inX === undefined) nodes.pop()
   }
-  if (points.length < 2) return
-  const artboard = resolveArtboardAtPoint(store.artboards, points[0]!)
-  const payload = buildPenPayload(points, artboard, closed)
+  if (nodes.length < 2) return
+  const artboard = resolveArtboardAtPoint(store.artboards, nodes[0]!)
+  const payload = buildPenNodesPayload(nodes, artboard, closed)
   if (!payload) return
   store.snapshot('Add path')
   const obj = store.addObject({ ...payload, artboardId: artboard?.id ?? null })
@@ -463,17 +519,23 @@ function finishPen(closed: boolean) {
 }
 
 function cancelPen() {
-  penPoints = null
+  penNodes = null
+  penDraft = null
   if (renderer) renderer.hidePenPreview()
 }
 
 function onStageMouseMove(e: MouseEvent) {
   lastPointer = { clientX: e.clientX, clientY: e.clientY }
-  if (store.activeTool === 'pen' && penPoints) onPenMove(e)
+  // While drawing but between anchors (no button down), show a rubber-band from
+  // the last anchor to the cursor.
+  if (store.activeTool === 'pen' && penNodes && !penDraft && renderer) {
+    const cursor = renderer.screenToCanvas(e.clientX, e.clientY)
+    renderer.showPenPreview([...penNodes, { x: cursor.x, y: cursor.y }], penNearStart(cursor))
+  }
 }
 
 function onStageDblClick(e: MouseEvent) {
-  if (store.activeTool !== 'pen' || !penPoints) return
+  if (store.activeTool !== 'pen' || !penNodes) return
   e.preventDefault()
   finishPen(false)
 }
@@ -665,7 +727,28 @@ function onObjectDragEnd(id: string, { dx, dy, alt }: { dx: number; dy: number; 
   }
   store.snapshot('Move')
   store.moveObject(id, { x: (obj.x || 0) + dx, y: (obj.y || 0) + dy })
+
+  // Drag-to-reparent: if the object's new center lands over a different
+  // artboard, hand it to that artboard (keeping it visually in place). Dropping
+  // over empty canvas leaves ownership unchanged.
+  const currentArtboard = obj.artboardId ? store.getArtboard(obj.artboardId) : null
+  const center = {
+    x: (currentArtboard?.x ?? 0) + (obj.x || 0) + (obj.width || 0) / 2,
+    y: (currentArtboard?.y ?? 0) + (obj.y || 0) + (obj.height || 0) / 2,
+  }
+  const target = artboardAtPoint(store.artboards, center)
+  if (target && target.id !== obj.artboardId) {
+    store.reparentObject(id, target.id)
+  }
+
   if (!store.selectedIds.includes(id)) store.selectObjects([id])
+}
+
+// Node-edit commit: the renderer hands back the reshaped nodes (local frame);
+// snapshot once per drag and persist, which regenerates the path's `d`.
+function onPathNodesChanged(id: string, nodes: PathNode[]) {
+  store.snapshot('Edit nodes')
+  store.updatePathNodes(id, nodes)
 }
 
 function onKeyDown(e: KeyboardEvent) {
@@ -681,7 +764,7 @@ function onKeyDown(e: KeyboardEvent) {
 
   // Pen: Enter finishes an open path; Escape cancels an in-progress path
   // (without leaving the tool) so the user can start over.
-  if (store.activeTool === 'pen' && penPoints) {
+  if (store.activeTool === 'pen' && penNodes) {
     if (e.key === 'Enter') {
       e.preventDefault()
       finishPen(false)
@@ -746,6 +829,10 @@ onMounted(() => {
   renderer.onObjectRotated = onObjectRotated
   renderer.onArtboardMounted = wireArtboard
   renderer.onArtboardResized = onArtboardResized
+  renderer.onPathNodesChanged = onPathNodesChanged
+  // Let the store measure true rendered geometry (e.g. for fit-to-artwork).
+  setObjectBoxMeasurer((obj) => (renderer ? renderer.measureObjectBox(obj as any) : null))
+  renderer.setNodeEditMode(store.activeTool === 'node')
   rerender()
   fitViewBox()
   window.addEventListener('keydown', onKeyDown)
@@ -756,9 +843,12 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
+  window.removeEventListener('mousemove', onPenDragMove)
+  window.removeEventListener('mouseup', onPenDragUp)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('paste', handlePaste)
+  setObjectBoxMeasurer(null)
   if (renderer) renderer.destroy()
   renderer = null
 })
@@ -802,7 +892,9 @@ watch(activeTool, () => {
     renderer.hidePenPreview()
   }
   toolDrag = null
-  penPoints = null
+  penNodes = null
+  penDraft = null
+  if (renderer) renderer.setNodeEditMode(store.activeTool === 'node')
 })
 
 // Keep the inline editor aligned while its target text object exists.
@@ -826,7 +918,8 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
   position: relative;
 }
 /* Select tool uses a pointer; space-drag panning still shows the grab hand. */
-.canvas-stage.tool-select {
+.canvas-stage.tool-select,
+.canvas-stage.tool-node {
   cursor: default;
 }
 .canvas-stage.panning {

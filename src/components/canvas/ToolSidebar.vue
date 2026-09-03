@@ -14,6 +14,20 @@
 
     <button
       class="tool-btn"
+      :class="{ active: activeTool === 'node' }"
+      title="Edit nodes (A)"
+      @click="pick('node')"
+    >
+      <!-- node/anchor editor: a path segment with anchor squares -->
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M5 17c4 0 6-10 14-10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        <rect x="3" y="15" width="4" height="4" fill="#fff" stroke="currentColor" stroke-width="1.6" />
+        <rect x="17" y="5" width="4" height="4" fill="#fff" stroke="currentColor" stroke-width="1.6" />
+      </svg>
+    </button>
+
+    <button
+      class="tool-btn"
       :class="{ active: activeTool === 'text' }"
       title="Text (T)"
       @click="pick('text')"

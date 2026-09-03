@@ -79,6 +79,44 @@ describe('canvas store — core mutations', () => {
     expect(store.getArtboard(b.id)!.objectIds).toContain(obj.id)
   })
 
+  it('reparentObject moves linkage and rebases coords to stay visually in place', () => {
+    const a = store.addArtboard({ x: 0, y: 0, width: 400, height: 400 })
+    const b = store.addArtboard({ x: 500, y: 100, width: 400, height: 400 })
+    // Object sits at local (50, 60) in A -> absolute (50, 60).
+    const obj = store.addObject({ type: 'path', artboardId: a.id, x: 50, y: 60 })
+
+    store.reparentObject(obj.id, b.id)
+
+    const after = store.getObject(obj.id)!
+    expect(after.artboardId).toBe(b.id)
+    // New local coords keep the same absolute position: b origin (500,100) so
+    // local becomes (50-500, 60-100) = (-450, -40).
+    expect(after.x).toBe(-450)
+    expect(after.y).toBe(-40)
+    expect(store.getArtboard(a.id)!.objectIds).not.toContain(obj.id)
+    expect(store.getArtboard(b.id)!.objectIds).toContain(obj.id)
+  })
+
+  it('reparentObject is a no-op when target is the current artboard', () => {
+    const a = store.addArtboard({ x: 10, y: 20, width: 400, height: 400 })
+    const obj = store.addObject({ type: 'path', artboardId: a.id, x: 5, y: 5 })
+    store.reparentObject(obj.id, a.id)
+    const after = store.getObject(obj.id)!
+    expect(after.artboardId).toBe(a.id)
+    expect(after.x).toBe(5)
+    expect(after.y).toBe(5)
+  })
+
+  it('reparentObject ignores an unknown target artboard id', () => {
+    const a = store.addArtboard({ x: 0, y: 0, width: 400, height: 400 })
+    const obj = store.addObject({ type: 'path', artboardId: a.id, x: 5, y: 5 })
+    store.reparentObject(obj.id, 'does-not-exist')
+    const after = store.getObject(obj.id)!
+    expect(after.artboardId).toBe(a.id)
+    expect(after.x).toBe(5)
+    expect(after.y).toBe(5)
+  })
+
   it('findByRole returns objects with matching semantic role', () => {
     store.addArtboard({})
     store.addObject({ type: 'path', semanticRole: 'logoSymbol' })

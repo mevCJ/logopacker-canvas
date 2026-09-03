@@ -41,6 +41,18 @@
           <input type="text" class="pp-text-input" :value="artboard.backgroundColor" @change="setArtboardBackground(val($event))" />
         </div>
       </section>
+
+      <section class="pp-section">
+        <button
+          type="button"
+          class="pp-fit-btn"
+          :disabled="!artboardHasArtwork"
+          :title="artboardHasArtwork ? 'Resize this artboard to fit its artwork' : 'This artboard has no artwork to fit'"
+          @click="fitArtboardToArtwork"
+        >
+          Fit artboard to artwork
+        </button>
+      </section>
     </div>
 
     <div v-else-if="!selected" class="pp-empty">
@@ -198,6 +210,9 @@ const roles = SEMANTIC_ROLES
 
 const selected = computed(() => store.singleSelected)
 const artboard = computed(() => store.selectedArtboard)
+const artboardHasArtwork = computed(() =>
+  (artboard.value?.objectIds || []).some((id) => !!store.getObject(id)),
+)
 const roleLabel = computed(() => {
   const r = selected.value?.semanticRole
   return r && r !== 'none' ? r : selected.value?.type || ''
@@ -274,6 +289,11 @@ function setArtboardBackground(v: string) {
   if (!artboard.value) return
   store.snapshot('Edit artboard')
   store.setArtboardBackground(artboard.value.id, v)
+}
+function fitArtboardToArtwork() {
+  if (!artboard.value || !artboardHasArtwork.value) return
+  store.snapshot('Fit artboard to artwork')
+  store.fitArtboardToArtwork(artboard.value.id)
 }
 
 function normalizeColor(c: unknown): string {
@@ -404,5 +424,25 @@ function normalizeColor(c: unknown): string {
   font-size: 12px;
   color: #a1a1aa;
   line-height: 1.4;
+}
+.pp-fit-btn {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #211a43;
+  border-radius: 8px;
+  background: #211a43;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.pp-fit-btn:hover:not(:disabled) {
+  background: #2e2559;
+}
+.pp-fit-btn:disabled {
+  background: #f4f4f5;
+  color: #a1a1aa;
+  border-color: #e4e4e7;
+  cursor: not-allowed;
 }
 </style>

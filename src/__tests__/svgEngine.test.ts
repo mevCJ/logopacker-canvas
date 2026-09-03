@@ -18,11 +18,17 @@ import {
   normalizeDragBox,
   boxIntersects,
   resolveArtboardAtPoint,
+  artboardAtPoint,
   mergeMarqueeSelection,
   buildShapePayload,
-  penPathData,
   pointsBounds,
-  buildPenPayload,
+  nodesToPathData,
+  nodesBounds,
+  translateNodes,
+  applyNodeDrag,
+  nodePointToCanvas,
+  canvasPointToNode,
+  buildPenNodesPayload,
   canvasPointToScreenRect,
   rotatePoint,
   boxCenter,
@@ -179,6 +185,21 @@ describe('svgEngine — shape + tool geometry helpers', () => {
     expect(resolveArtboardAtPoint(undefined, { x: 0, y: 0 })).toBeNull()
   })
 
+  it('artboardAtPoint returns null over empty canvas (no fallback)', () => {
+    const a = { id: 'a', x: 0, y: 0, width: 100, height: 100 }
+    const b = { id: 'b', x: 200, y: 0, width: 100, height: 100 }
+    expect(artboardAtPoint([a, b], { x: 50, y: 50 })!.id).toBe('a')
+    expect(artboardAtPoint([a, b], { x: 999, y: 999 })).toBeNull()
+    expect(artboardAtPoint([], { x: 0, y: 0 })).toBeNull()
+    expect(artboardAtPoint(undefined, { x: 0, y: 0 })).toBeNull()
+  })
+
+  it('artboardAtPoint prefers the last (topmost) overlapping artboard', () => {
+    const a = { id: 'a', x: 0, y: 0, width: 100, height: 100 }
+    const b = { id: 'b', x: 50, y: 50, width: 100, height: 100 }
+    expect(artboardAtPoint([a, b], { x: 75, y: 75 })!.id).toBe('b')
+  })
+
   it('resolveArtboardAtPoint prefers the last (topmost) overlapping artboard', () => {
     const a = { id: 'a', x: 0, y: 0, width: 100, height: 100 }
     const b = { id: 'b', x: 50, y: 50, width: 100, height: 100 }
@@ -229,14 +250,6 @@ describe('svgEngine — shape + tool geometry helpers', () => {
     expect(buildShapePayload('line', { x: 10, y: 10 }, { x: 10, y: 10 }, null)).toBeNull()
   })
 
-  it('penPathData builds an open polyline and closes with Z', () => {
-    const pts = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]
-    expect(penPathData(pts)).toBe('M0 0 L10 0 L10 10')
-    expect(penPathData(pts, true)).toBe('M0 0 L10 0 L10 10 Z')
-    // Fewer than 3 points can't be a closed area.
-    expect(penPathData([{ x: 0, y: 0 }, { x: 10, y: 0 }], true)).toBe('M0 0 L10 0')
-  })
-
   it('pointsBounds spans the min/max of all points', () => {
     expect(pointsBounds([{ x: 5, y: 8 }, { x: 20, y: 3 }, { x: 12, y: 30 }])).toEqual({
       x: 5,
@@ -246,30 +259,84 @@ describe('svgEngine — shape + tool geometry helpers', () => {
     })
   })
 
-  it('buildPenPayload builds a closed, filled path in artboard-local coords', () => {
-    const pts = [
+  it('nodesToPathData emits L for corners and C for smooth anchors', () => {
+    // All corners -> straight lines.
+    const corners = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]
+    expect(nodesToPathData(corners)).toBe('M0 0 L10 0 L10 10')
+    expect(nodesToPathData(corners, true)).toBe('M0 0 L10 0 L10 10 Z')
+    // A smooth middle anchor curves the segments into/out of it.
+    const smooth = [
+      { x: 0, y: 0 },
+      { x: 10, y: 10, inX: 5, inY: 10, outX: 15, outY: 10 },
+      { x: 20, y: 0 },
+    ]
+    expect(nodesToPathData(smooth)).toBe('M0 0 C0 0 5 10 10 10 C15 10 20 0 20 0')
+  })
+
+  it('nodesBounds includes tangent handles, translateNodes shifts everything', () => {
+    const nodes = [{ x: 0, y: 0, outX: -5, outY: 8 }, { x: 10, y: 2 }]
+    // Bounds must reach the out handle at (-5, 8).
+    expect(nodesBounds(nodes)).toEqual({ x: -5, y: 0, width: 15, height: 8 })
+    const moved = translateNodes(nodes, 100, 50)
+    expect(moved[0]).toEqual({ x: 100, y: 50, inX: undefined, inY: undefined, outX: 95, outY: 58 })
+  })
+
+  it('buildPenNodesPayload normalizes to bounds origin and keeps nodes/d in sync', () => {
+    const nodes = [
       { x: 120, y: 130 },
       { x: 180, y: 130 },
       { x: 150, y: 180 },
     ]
-    const p = buildPenPayload(pts, { x: 100, y: 100 }, true)!
+    const p = buildPenNodesPayload(nodes, { x: 100, y: 100 }, true)!
     expect(p.type).toBe('path')
-    // Local origin = bbox top-left (120-100, 130-100) = (20, 30); d relative to it.
+    // Local origin = bbox top-left (120-100, 130-100) = (20, 30); nodes relative.
     expect(p).toMatchObject({ x: 20, y: 30, width: 60, height: 50, fill: '#211A43', stroke: 'none' })
+    expect(p.nodes[0]).toMatchObject({ x: 0, y: 0 })
     expect(p.d).toBe('M0 0 L60 0 L30 50 Z')
   })
 
-  it('buildPenPayload builds an open, stroked path', () => {
-    const p = buildPenPayload([{ x: 0, y: 0 }, { x: 40, y: 20 }], null, false)!
+  it('buildPenNodesPayload builds an open stroked path and rejects < 2 anchors', () => {
+    const p = buildPenNodesPayload([{ x: 0, y: 0 }, { x: 40, y: 20 }], null, false)!
     expect(p.fill).toBe('none')
     expect(p.stroke).toBe('#211A43')
     expect(p.strokeWidth).toBe(2)
     expect(p.d).toBe('M0 0 L40 20')
+    expect(buildPenNodesPayload([{ x: 10, y: 10 }], null)).toBeNull()
   })
 
-  it('buildPenPayload rejects paths with fewer than 2 points', () => {
-    expect(buildPenPayload([{ x: 10, y: 10 }], null)).toBeNull()
-    expect(buildPenPayload([], null)).toBeNull()
+  it('applyNodeDrag moves an anchor with its handles', () => {
+    const nodes = [
+      { x: 0, y: 0 },
+      { x: 10, y: 10, inX: 5, inY: 10, outX: 15, outY: 10 },
+    ]
+    const out = applyNodeDrag(nodes, 1, 'anchor', 4, -2)
+    expect(out[1]).toEqual({ x: 14, y: 8, inX: 9, inY: 8, outX: 19, outY: 8 })
+    // Other nodes are untouched (but cloned).
+    expect(out[0]).toEqual({ x: 0, y: 0 })
+  })
+
+  it('applyNodeDrag moves a handle and mirrors its opposite about the anchor', () => {
+    const nodes = [{ x: 10, y: 10, inX: 5, inY: 10, outX: 15, outY: 10 }]
+    // Drag the out handle from (15,10) by (+3,-4) -> (18,6); in mirrors to (2,14).
+    const out = applyNodeDrag(nodes, 0, 'out', 3, -4)
+    expect(out[0]).toMatchObject({ outX: 18, outY: 6, inX: 2, inY: 14 })
+  })
+
+  it('nodePointToCanvas matches the render transform (translate/scale/rotate) and round-trips', () => {
+    // No rotation, unit scale: a local node just shifts by the object origin —
+    // exactly where translate(absX,absY) + local d renders it. This is the
+    // regression the node-overlay offset bug was about.
+    const plain = { absX: 100, absY: 50, rotationDeg: 0, scaleX: 1, scaleY: 1, cx: 10, cy: 10 }
+    expect(nodePointToCanvas({ x: 6, y: 8 }, plain)).toEqual({ x: 106, y: 58 })
+
+    // With scale about the origin and rotation about the post-scale pivot.
+    const t = { absX: 100, absY: 50, rotationDeg: 90, scaleX: 2, scaleY: 2, cx: 20, cy: 20 }
+    const p = { x: 5, y: 0 }
+    const canvas = nodePointToCanvas(p, t)
+    // Round-trip back to local within float tolerance.
+    const back = canvasPointToNode(canvas, t)
+    expect(back.x).toBeCloseTo(p.x, 6)
+    expect(back.y).toBeCloseTo(p.y, 6)
   })
 
   it('canvasPointToScreenRect maps canvas coords to host-relative screen coords', () => {

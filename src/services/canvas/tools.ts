@@ -278,6 +278,30 @@ export function buildCanvasTools(
         return text({ artboard: artboardView(a) })
       },
     },
+    {
+      name: 'fit_artboard_to_artwork',
+      description:
+        'Resizes and repositions an artboard so it tightly wraps the artwork it contains (its objects). Objects stay visually in place. Optionally add uniform padding (canvas units) around the artwork. No-op for an empty artboard.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artboardId: { type: 'string', description: 'The artboard to fit.' },
+          padding: {
+            type: 'number',
+            description: 'Optional uniform margin around the artwork, in canvas units. Defaults to 0 (tight crop).',
+          },
+        },
+        required: ['artboardId'],
+      },
+      execute({ artboardId, padding = 0 }: { artboardId: string; padding?: number }) {
+        const a = store.getArtboard(artboardId)
+        if (!a) return text(`No artboard with id ${artboardId}`)
+        const fitted = store.fitArtboardToArtwork(artboardId, { padding })
+        if (!fitted) return text(`Artboard "${a.name}" has no artwork to fit.`)
+        log(`Fit artboard "${fitted.name}" to artwork`)
+        return text({ artboard: artboardView(fitted) })
+      },
+    },
 
     // ---- Object mutations --------------------------------------------------
     {
@@ -339,6 +363,33 @@ export function buildCanvasTools(
         store.moveObject(id, { x: nx, y: ny })
         log('Moved object')
         return text({ id, x: nx, y: ny })
+      },
+    },
+    {
+      name: 'reparent_object',
+      description:
+        'Moves an object into a different artboard while keeping it visually in place on the canvas (its local x/y are rebased to the new artboard). Pass artboardId=null to detach the object to the canvas. No-op if it already belongs to the target.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          artboardId: {
+            type: ['string', 'null'],
+            description: 'Target artboard id, or null to detach the object from any artboard.',
+          },
+        },
+        required: ['id', 'artboardId'],
+      },
+      execute({ id, artboardId }: { id: string; artboardId: string | null }) {
+        const o = store.getObject(id)
+        if (!o) return text(`No object with id ${id}`)
+        if (artboardId != null && !store.getArtboard(artboardId)) {
+          return text(`No artboard with id ${artboardId}`)
+        }
+        const updated = store.reparentObject(id, artboardId)
+        if (!updated) return text(`Could not reparent object ${id}`)
+        log('Reparented object')
+        return text({ id, artboardId: updated.artboardId, x: updated.x, y: updated.y })
       },
     },
     {

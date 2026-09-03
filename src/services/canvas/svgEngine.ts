@@ -37,6 +37,8 @@ export interface RenderObject {
   fill?: string | null
   stroke?: string | null
   strokeWidth?: number
+  nodes?: PathNode[]
+  closed?: boolean
   text?: string
   fontFamily?: string
   fontSize?: number
@@ -207,16 +209,116 @@ export function linePathData(x1: number, y1: number, x2: number, y2: number): st
   return `M${x1} ${y1} L${x2} ${y2}`
 }
 
-// Build SVG path data from an ordered list of anchor points (straight segments,
-// the "polygonal pen"). `closed` appends a Z so fills render as a solid shape.
-// Points are in the path's own local frame.
-export function penPathData(points: { x: number; y: number }[], closed = false): string {
-  const first = points[0]
+// A single anchor on a Bézier pen path, in the path object's local/base frame.
+// `in`/`out` are the absolute positions of the incoming/outgoing tangent
+// control points. When a handle is absent the segment on that side is straight
+// (a corner point). Illustrator-style smooth points keep in/out mirrored, but
+// the model allows independent handles for later broken-handle editing.
+export interface PathNode {
+  x: number
+  y: number
+  inX?: number
+  inY?: number
+  outX?: number
+  outY?: number
+}
+
+// Serialize an ordered list of anchors into SVG path data. A segment uses a
+// cubic curve (C) when either endpoint contributes a handle, else a straight
+// line (L). `closed` connects the last anchor back to the first and appends Z.
+export function nodesToPathData(nodes: PathNode[], closed = false): string {
+  const first = nodes[0]
   if (!first) return ''
-  let d = `M${first.x} ${first.y}`
-  for (let i = 1; i < points.length; i++) d += ` L${points[i]!.x} ${points[i]!.y}`
-  if (closed && points.length > 2) d += ' Z'
+  let d = `M${num(first.x)} ${num(first.y)}`
+  const seg = (a: PathNode, b: PathNode) => {
+    const c1x = a.outX ?? a.x
+    const c1y = a.outY ?? a.y
+    const c2x = b.inX ?? b.x
+    const c2y = b.inY ?? b.y
+    const straight = a.outX === undefined && b.inX === undefined
+    return straight
+      ? ` L${num(b.x)} ${num(b.y)}`
+      : ` C${num(c1x)} ${num(c1y)} ${num(c2x)} ${num(c2y)} ${num(b.x)} ${num(b.y)}`
+  }
+  for (let i = 1; i < nodes.length; i++) d += seg(nodes[i - 1]!, nodes[i]!)
+  if (closed && nodes.length > 2) {
+    const last = nodes[nodes.length - 1]!
+    // The closing segment only needs an explicit command when it's a curve;
+    // for a straight closing edge, Z draws the line back to the start.
+    if (last.outX !== undefined || first.inX !== undefined) d += seg(last, first)
+    d += ' Z'
+  }
   return d
+}
+
+// Round to a stable 3 decimals so serialized path data stays compact and
+// deterministic (avoids float noise like 40.000000001 in tests + diffs).
+function num(n: number): number {
+  return Math.round(n * 1000) / 1000
+}
+
+// Axis-aligned bounds of a set of anchors, including their tangent handles so
+// the object box encloses the visible curve, not just the anchor points.
+export function nodesBounds(nodes: PathNode[]): Box {
+  const pts: { x: number; y: number }[] = []
+  for (const n of nodes) {
+    pts.push({ x: n.x, y: n.y })
+    if (n.inX !== undefined && n.inY !== undefined) pts.push({ x: n.inX, y: n.inY })
+    if (n.outX !== undefined && n.outY !== undefined) pts.push({ x: n.outX, y: n.outY })
+  }
+  return pointsBounds(pts)
+}
+
+// Shift every anchor + handle by (dx, dy). Returns new node objects.
+export function translateNodes(nodes: PathNode[], dx: number, dy: number): PathNode[] {
+  return nodes.map((n) => ({
+    x: n.x + dx,
+    y: n.y + dy,
+    inX: n.inX === undefined ? undefined : n.inX + dx,
+    inY: n.inY === undefined ? undefined : n.inY + dy,
+    outX: n.outX === undefined ? undefined : n.outX + dx,
+    outY: n.outY === undefined ? undefined : n.outY + dy,
+  }))
+}
+
+// Apply a drag delta (dx, dy in the path's local frame) to one node's anchor or
+// a tangent handle, returning a new node list. Dragging the anchor moves the
+// anchor and both handles together. Dragging a handle moves that control point
+// and mirrors its opposite handle about the anchor (smooth-point behavior).
+export function applyNodeDrag(
+  nodes: PathNode[],
+  index: number,
+  kind: 'anchor' | 'in' | 'out',
+  dx: number,
+  dy: number,
+): PathNode[] {
+  return nodes.map((n, i) => {
+    if (i !== index) return { ...n }
+    if (kind === 'anchor') {
+      return {
+        x: n.x + dx,
+        y: n.y + dy,
+        inX: n.inX === undefined ? undefined : n.inX + dx,
+        inY: n.inY === undefined ? undefined : n.inY + dy,
+        outX: n.outX === undefined ? undefined : n.outX + dx,
+        outY: n.outY === undefined ? undefined : n.outY + dy,
+      }
+    }
+    const next: PathNode = { ...n }
+    if (kind === 'out') {
+      next.outX = (n.outX ?? n.x) + dx
+      next.outY = (n.outY ?? n.y) + dy
+      // Mirror the in handle about the anchor to keep the point smooth.
+      next.inX = n.x - (next.outX - n.x)
+      next.inY = n.y - (next.outY - n.y)
+    } else {
+      next.inX = (n.inX ?? n.x) + dx
+      next.inY = (n.inY ?? n.y) + dy
+      next.outX = n.x - (next.inX - n.x)
+      next.outY = n.y - (next.inY - n.y)
+    }
+    return next
+  })
 }
 
 // Axis-aligned bounds of a set of points. Returns a zero-size box at the point
@@ -286,6 +388,23 @@ export function resolveArtboardAtPoint(
   return hit || artboards[0] || null
 }
 
+// Strict variant of resolveArtboardAtPoint: returns the topmost artboard the
+// point actually falls inside, or null when it's over none. Unlike
+// resolveArtboardAtPoint there is no first-artboard fallback, which is what
+// drag-to-reparent needs — dragging into empty canvas should detach, not snap
+// the object into an unrelated artboard.
+export function artboardAtPoint(
+  artboards: RenderArtboard[] | undefined,
+  point: { x: number; y: number },
+): RenderArtboard | null {
+  if (!artboards || artboards.length === 0) return null
+  let hit: RenderArtboard | null = null
+  for (const a of artboards) {
+    if (pointInArtboard(point, a)) hit = a
+  }
+  return hit
+}
+
 // ---------------------------------------------------------------------------
 // Resize + rotation geometry. All operate in canvas coordinates. `box` is the
 // object's axis-aligned bounds { x, y, width, height } in the UN-rotated frame;
@@ -348,6 +467,45 @@ export function objectTransform(
   if (rotationDeg) parts.push(`rotate(${rotationDeg} ${cx} ${cy})`)
   if (scaleX !== 1 || scaleY !== 1) parts.push(`scale(${scaleX} ${scaleY})`)
   return parts.join(' ')
+}
+
+// The affine transform a path/image object applies to its local geometry,
+// mirroring objectTransform's order: scale (about local origin), then rotate
+// about the post-scale pivot (cx, cy), then translate by (absX, absY). Kept as
+// explicit params so the node-edit overlay maps points with the exact same math
+// the renderer uses — instead of the browser's getCTM, whose reference frame
+// (viewBox units vs CSS pixels) is engine-dependent and drifts the overlay off
+// the shape.
+export interface ObjectTransformParams {
+  absX: number
+  absY: number
+  rotationDeg: number
+  scaleX: number
+  scaleY: number
+  cx: number
+  cy: number
+}
+
+// Map a point from an object's local/base frame to canvas (viewBox) space.
+export function nodePointToCanvas(
+  p: { x: number; y: number },
+  t: ObjectTransformParams,
+): { x: number; y: number } {
+  const scaled = { x: p.x * t.scaleX, y: p.y * t.scaleY }
+  const rotated = t.rotationDeg ? rotatePoint({ x: t.cx, y: t.cy }, scaled, t.rotationDeg) : scaled
+  return { x: rotated.x + t.absX, y: rotated.y + t.absY }
+}
+
+// Inverse of nodePointToCanvas: canvas point -> object local/base frame.
+export function canvasPointToNode(
+  p: { x: number; y: number },
+  t: ObjectTransformParams,
+): { x: number; y: number } {
+  const translated = { x: p.x - t.absX, y: p.y - t.absY }
+  const unrotated = t.rotationDeg
+    ? rotatePoint({ x: t.cx, y: t.cy }, translated, -t.rotationDeg)
+    : translated
+  return { x: t.scaleX ? unrotated.x / t.scaleX : 0, y: t.scaleY ? unrotated.y / t.scaleY : 0 }
 }
 
 // Local (un-rotated) positions of every handle for a box. The rotation handle
@@ -558,18 +716,20 @@ export function buildShapePayload(
   }
 }
 
-// Build the store payload for a pen path drawn as a list of anchor points (in
-// canvas coordinates) over the given artboard. Positions are converted to the
-// artboard's local space and the path data is stored relative to the object
-// origin (its bounding-box top-left). A closed path is filled; an open path is
-// stroked. Returns null for a degenerate (< 2 point) path.
-export function buildPenPayload(
-  points: { x: number; y: number }[],
+// Build the store payload for a Bézier pen path from anchors given in CANVAS
+// coordinates. Anchors (and their handles) are converted to the artboard's
+// local space, then normalized so the object origin (x, y) is the geometry's
+// bounding-box top-left and the stored `nodes`/`d` are relative to it. A closed
+// path is filled; an open one is stroked. Returns null for < 2 anchors.
+export function buildPenNodesPayload(
+  nodes: PathNode[],
   artboard: { x: number; y: number } | null,
   closed = false,
 ): {
   type: 'path'
   d: string
+  nodes: PathNode[]
+  closed: boolean
   x: number
   y: number
   width: number
@@ -579,16 +739,17 @@ export function buildPenPayload(
   strokeWidth: number
   semanticRole: string
 } | null {
-  if (!points || points.length < 2) return null
+  if (!nodes || nodes.length < 2) return null
   const ax = artboard ? artboard.x : 0
   const ay = artboard ? artboard.y : 0
-  const local = points.map((p) => ({ x: p.x - ax, y: p.y - ay }))
-  const bounds = pointsBounds(local)
-  // Store geometry relative to the object origin (bounds top-left).
-  const rel = local.map((p) => ({ x: p.x - bounds.x, y: p.y - bounds.y }))
+  const local = translateNodes(nodes, -ax, -ay)
+  const bounds = nodesBounds(local)
+  const rel = translateNodes(local, -bounds.x, -bounds.y)
   return {
     type: 'path',
-    d: penPathData(rel, closed),
+    d: nodesToPathData(rel, closed),
+    nodes: rel,
+    closed,
     x: bounds.x,
     y: bounds.y,
     width: bounds.width,
@@ -698,11 +859,20 @@ export class CanvasRenderer {
   onObjectRotated: RotateHook | null = null
   onArtboardMounted: ArtboardMountedHook | null = null
   onArtboardResized: ArtboardResizeHook | null = null
+  // Fired when the node-edit tool commits a reshape (drag of an anchor/handle).
+  // Nodes are in the object's local/base frame, ready for store.updatePathNodes.
+  onPathNodesChanged: ((id: string, nodes: PathNode[]) => void) | null = null
 
   // The currently selected objects (geometry needed to draw handles). Kept in
   // sync by setSelection so handle overlays can be redrawn after any render.
   private _selectedObjects: RenderObject[] = []
   private _liveBox: Box | null = null // live-preview box during a handle drag
+  // When true, a single selected path is drawn with editable Bézier nodes
+  // (anchors + handles) instead of the transform handles. Set by the node tool.
+  private _nodeEditMode = false
+  // Live node override during an anchor/handle drag (local frame), so the
+  // overlay + path preview follow the pointer before the store commit.
+  private _liveNodes: PathNode[] | null = null
 
   private _selectedArtboardId: string | null = null
   private _artboardBoxes = new Map<string, { x: number; y: number; width: number; height: number }>()
@@ -780,6 +950,16 @@ export class CanvasRenderer {
     }
     this._selectedObjects = objects.filter((o) => set.has(o.id))
     this._liveBox = null
+    this._liveNodes = null
+    this._redrawSelection()
+  }
+
+  // Toggle node-edit rendering. When enabled and a single node-based path is
+  // selected, the selection shows draggable anchors + tangent handles.
+  setNodeEditMode(on: boolean): void {
+    if (this._nodeEditMode === on) return
+    this._nodeEditMode = on
+    this._liveNodes = null
     this._redrawSelection()
   }
 
@@ -840,6 +1020,15 @@ export class CanvasRenderer {
     return { x: originX, y: originY, width: obj.width || 0, height: obj.height || 0 }
   }
 
+  // Public accessor for an object's measured, canvas-space bounds in its
+  // un-rotated frame. Uses the same measurement as the selection outline (real
+  // SVG bbox for paths/text), so callers get the true rendered extent rather
+  // than the object's possibly-stale stored width/height. Returns null when the
+  // object isn't currently rendered.
+  measureObjectBox(obj: RenderObject): Box | null {
+    return this._objectBox(obj)
+  }
+
   private _redrawSelection(): void {
     this.overlayLayer.clear()
     this.handleLayer.clear()
@@ -865,9 +1054,130 @@ export class CanvasRenderer {
     }
 
     const obj = this._selectedObjects[0]!
+    // Node-edit mode: a node-based path shows anchors + handles instead of the
+    // transform box. Falls through to normal handles for other objects.
+    if (this._nodeEditMode && obj.type === 'path' && (this._liveNodes || obj.nodes)) {
+      this._drawNodeEditor(obj, strokeW)
+      return
+    }
     const box = this._liveBox || this._objectBox(obj)
     if (!box) return
     this._drawSingleSelection(obj, box, strokeW)
+  }
+
+  // Recreate the exact transform the renderer applied to this path (see
+  // _renderObject): scale = display/base, rotate about the post-scale geometry
+  // center, translate to the object's absolute origin. Using the same math as
+  // rendering (rather than the browser's getCTM) keeps the node overlay glued
+  // to the shape regardless of engine CTM quirks.
+  private _objectTransformParams(obj: RenderObject): ObjectTransformParams {
+    const ab = obj.artboardId ? this._artboardBoxes.get(obj.artboardId) : null
+    const absX = (ab ? ab.x : 0) + (obj.x || 0)
+    const absY = (ab ? ab.y : 0) + (obj.y || 0)
+    const dispW = obj.width || 0
+    const dispH = obj.height || 0
+    const baseW = obj.baseWidth || dispW || 1
+    const baseH = obj.baseHeight || dispH || 1
+    const scaleX = baseW ? dispW / baseW : 1
+    const scaleY = baseH ? dispH / baseH : 1
+    const el = this._objectEls.get(obj.id)
+    const c = el
+      ? this._geometryCenter(el, dispW, dispH, scaleX, scaleY)
+      : { cx: dispW / 2, cy: dispH / 2 }
+    return { absX, absY, rotationDeg: obj.rotation || 0, scaleX, scaleY, cx: c.cx, cy: c.cy }
+  }
+
+  // Draw the editable-node overlay (anchors + tangent handles) for a path, and
+  // wire pointer drags that reshape it. Node coords are local; every drawn
+  // point is mapped to canvas space via the element CTM so the overlay tracks
+  // the path through any rotation/scale.
+  private _drawNodeEditor(obj: RenderObject, strokeW: number): void {
+    const el = this._objectEls.get(obj.id)
+    const nodes = this._liveNodes || obj.nodes || []
+    if (!el || !nodes.length) return
+    const vb = this.getViewBox()
+    const r = Math.max(3, vb.width / 130)
+    const hr = Math.max(2, vb.width / 200)
+    const t = this._objectTransformParams(obj)
+
+    nodes.forEach((n, i) => {
+      const a = nodePointToCanvas({ x: n.x, y: n.y }, t)
+      // Tangent handles: line from anchor to handle + a draggable dot.
+      const drawHandle = (kind: 'in' | 'out', hx?: number, hy?: number) => {
+        if (hx === undefined || hy === undefined) return
+        const hp = nodePointToCanvas({ x: hx, y: hy }, t)
+        this.overlayLayer
+          .line(a.x, a.y, hp.x, hp.y)
+          .stroke({ color: '#2563eb', width: strokeW })
+          .attr({ 'pointer-events': 'none' })
+        const dot = this.handleLayer
+          .circle(hr * 2)
+          .center(hp.x, hp.y)
+          .fill('#2563eb')
+          .stroke({ color: '#ffffff', width: strokeW })
+          .css('cursor', 'move')
+        this._wireNodeDrag(obj.id, i, kind)(dot)
+      }
+      drawHandle('in', n.inX, n.inY)
+      drawHandle('out', n.outX, n.outY)
+      // Anchor square (drawn last so it sits above the handle lines).
+      const sq = this.handleLayer
+        .rect(r * 2, r * 2)
+        .center(a.x, a.y)
+        .fill('#ffffff')
+        .stroke({ color: '#2563eb', width: strokeW })
+        .css('cursor', 'move')
+      this._wireNodeDrag(obj.id, i, 'anchor')(sq)
+    })
+  }
+
+  // Wire a drag on an anchor square or a tangent-handle dot. Dragging an anchor
+  // moves it and its handles together; dragging a handle moves just that
+  // control point (its mirror is kept symmetric for a smooth feel). Commits via
+  // onPathNodesChanged on release.
+  private _wireNodeDrag(id: string, index: number, kind: 'anchor' | 'in' | 'out') {
+    return (el: SvgEl) => {
+      const node = el.node as SVGElement
+      const onDown = (e: MouseEvent) => {
+        e.stopPropagation()
+        e.preventDefault()
+        const obj = this._selectedObjects.find((o) => o.id === id)
+        const objEl = this._objectEls.get(id)
+        if (!obj || obj.type !== 'path' || !objEl) return
+        const base = (obj.nodes || []).map((n) => ({ ...n }))
+        const t = this._objectTransformParams(obj)
+        const startLocal = canvasPointToNode(this.screenToCanvas(e.clientX, e.clientY), t)
+        const onMove = (ev: MouseEvent) => {
+          const curLocal = canvasPointToNode(this.screenToCanvas(ev.clientX, ev.clientY), t)
+          const dx = curLocal.x - startLocal.x
+          const dy = curLocal.y - startLocal.y
+          this._liveNodes = applyNodeDrag(base, index, kind, dx, dy)
+          this._applyLivePath(objEl, obj)
+          this._redrawSelection()
+        }
+        const onUp = () => {
+          window.removeEventListener('mousemove', onMove)
+          window.removeEventListener('mouseup', onUp)
+          const next = this._liveNodes
+          this._liveNodes = null
+          if (next && typeof this.onPathNodesChanged === 'function') {
+            this.onPathNodesChanged(id, next)
+          } else {
+            this._redrawSelection()
+          }
+        }
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+      }
+      node.addEventListener('mousedown', onDown)
+    }
+  }
+
+  // Preview the reshaped path live during a node drag by rewriting the object
+  // element's `d` (base frame) without going through the store.
+  private _applyLivePath(el: SvgEl, obj: RenderObject): void {
+    if (!this._liveNodes) return
+    el.attr('d', nodesToPathData(this._liveNodes, !!obj.closed))
   }
 
   private _drawSingleSelection(obj: RenderObject, box: Box, strokeW: number): void {
@@ -1434,29 +1744,35 @@ export class CanvasRenderer {
   // Draw/update the in-progress pen path: committed anchors + segments, plus a
   // rubber-band segment to the cursor. `nearStart` highlights the first anchor
   // to signal that clicking will close the path. All points in canvas coords.
-  showPenPreview(
-    points: { x: number; y: number }[],
-    cursor: { x: number; y: number } | null,
-    nearStart = false,
-  ): void {
+  showPenPreview(nodes: PathNode[], nearStart = false): void {
     this.hidePenPreview()
-    if (!points.length) return
+    if (!nodes.length) return
     const vb = this.getViewBox()
     const strokeW = Math.max(0.5, vb.width / 700)
     const g = this.toolLayer.group().attr({ 'pointer-events': 'none' })
 
-    const path = [...points]
-    if (cursor) path.push(cursor)
-    if (path.length > 1) {
-      const d = penPathData(path, false)
-      g.path(d).fill('none').stroke({ color: '#2563eb', width: strokeW })
+    // The Bézier curve through all anchors (nodes are already in canvas coords
+    // for the preview).
+    if (nodes.length > 1) {
+      g.path(nodesToPathData(nodes, false)).fill('none').stroke({ color: '#2563eb', width: strokeW })
     }
 
     const r = Math.max(2, vb.width / 240)
-    points.forEach((p, i) => {
+    const hr = Math.max(1.5, vb.width / 320)
+    nodes.forEach((n, i) => {
+      // Tangent handles (in/out) for smooth anchors: a line to a small dot.
+      const drawHandle = (hx?: number, hy?: number) => {
+        if (hx === undefined || hy === undefined) return
+        g.line(n.x, n.y, hx, hy).stroke({ color: '#2563eb', width: strokeW })
+        g.circle(hr * 2).center(hx, hy).fill('#2563eb').stroke({ color: '#ffffff', width: strokeW })
+      }
+      drawHandle(n.inX, n.inY)
+      drawHandle(n.outX, n.outY)
+      // Anchor square; the first anchor fills solid when the cursor is near it
+      // to signal that clicking will close the path.
       const first = i === 0
-      g.circle(r * 2)
-        .center(p.x, p.y)
+      g.rect(r * 2, r * 2)
+        .center(n.x, n.y)
         .fill(first && nearStart ? '#2563eb' : '#ffffff')
         .stroke({ color: '#2563eb', width: strokeW })
     })
