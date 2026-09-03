@@ -5,6 +5,8 @@
 // a step to the agent activity log, and returns { content: [{ type, text }] }.
 import type { CanvasStore, CanvasObject, Artboard } from '@/stores/canvas'
 import { text, type WebMcpToolDefinition, type ToolLogger } from './webmcp'
+import { svgToPathObjects } from './svgToPaths'
+import { nodesBounds, nodesToPathData, translateNodes, type PathNode } from './svgEngine'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -121,6 +123,81 @@ function applyProps(
   }
   if (Object.keys(patch).length) store.updateObject(o.id, patch)
   return applied
+}
+
+// Convert SVG markup into native, node-editable path objects and add them to an
+// artboard — the headless equivalent of CanvasStage's placeSvgAsPaths (which
+// centers on the cursor). Here the agent supplies an explicit top-left (x, y)
+// in artboard-local coordinates and an explicit uniform scale, so placement is
+// deterministic without a pointer. Each <path> in the markup becomes one
+// PathObject; relative positions between paths are preserved, and each path is
+// rebased so its own object origin is its geometry's bbox top-left (matching
+// how pen/shape/imported paths are stored). Returns the created object ids.
+function addSvgPaths(
+  store: CanvasStore,
+  markup: string,
+  opts: { artboardId?: string; x?: number; y?: number; scale?: number; semanticRole?: string } = {},
+): { ids: string[]; error?: string } {
+  // Accept a bare fragment (e.g. "<path .../>") by wrapping it in a root <svg>.
+  // Path data is authored in its own coordinate space, so no viewBox is needed;
+  // the agent controls placement/size via x/y/scale.
+  const trimmed = markup.trim()
+  const wrapped = /<svg[\s>]/i.test(trimmed) ? trimmed : `<svg xmlns="http://www.w3.org/2000/svg">${trimmed}</svg>`
+  const parsed = svgToPathObjects(wrapped)
+  if (!parsed) {
+    return { ids: [], error: 'No convertible <path> geometry found in the SVG. Only <path> elements are supported (not <rect>/<circle>/<text>/gradients).' }
+  }
+  const scale = typeof opts.scale === 'number' && opts.scale > 0 ? opts.scale : 1
+  const originX = opts.x ?? 0
+  const originY = opts.y ?? 0
+  const vb = parsed.viewBox
+  const artboardId = opts.artboardId && store.getArtboard(opts.artboardId) ? opts.artboardId : undefined
+
+  const ids: string[] = []
+  for (const p of parsed.paths) {
+    // viewBox coords -> placed coords: subtract the viewBox origin, scale, then
+    // offset to the requested top-left. Then rebase each path so its object
+    // origin (x,y) is its geometry's bbox top-left.
+    const map = (x: number, y: number) => ({
+      x: originX + (x - vb.x) * scale,
+      y: originY + (y - vb.y) * scale,
+    })
+    const placed: PathNode[] = p.nodes.map((n) => {
+      const a = map(n.x, n.y)
+      const out: PathNode = { x: a.x, y: a.y }
+      if (n.inX !== undefined && n.inY !== undefined) {
+        const h = map(n.inX, n.inY)
+        out.inX = h.x
+        out.inY = h.y
+      }
+      if (n.outX !== undefined && n.outY !== undefined) {
+        const h = map(n.outX, n.outY)
+        out.outX = h.x
+        out.outY = h.y
+      }
+      return out
+    })
+    const bounds = nodesBounds(placed)
+    const rel = translateNodes(placed, -bounds.x, -bounds.y)
+    const obj = store.addObject({
+      type: 'path',
+      d: nodesToPathData(rel, p.closed, p.subpaths),
+      nodes: rel,
+      closed: p.closed,
+      subpaths: p.subpaths,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      fill: p.fill,
+      stroke: p.stroke,
+      strokeWidth: p.strokeWidth * scale,
+      artboardId: artboardId ?? null,
+      semanticRole: opts.semanticRole || 'decorative',
+    })
+    ids.push(obj.id)
+  }
+  return { ids }
 }
 
 export function buildCanvasTools(
@@ -478,6 +555,36 @@ export function buildCanvasTools(
         if (!o) return text(`Object ${id} is not a path or does not exist.`)
         log('Edited path data')
         return text({ id, updated: true })
+      },
+    },
+    {
+      name: 'draw_svg',
+      description:
+        'Draws new shapes by providing SVG markup. Pass either a full <svg>…</svg> document or a fragment of one or more <path> elements. Each <path> becomes a native, node-editable path object on the target artboard (fully editable afterwards by the other tools). ' +
+        'Coordinates come from the SVG (its viewBox, or the path data if no viewBox). Use `x`/`y` to place the top-left of the artwork in artboard-local coordinates, and `scale` to resize uniformly. ' +
+        'Only <path> geometry is converted — <rect>, <circle>, <text>, gradients and CSS-class styling are NOT supported; convert shapes to paths first. Fill/stroke are read from each path’s own attributes. Returns the created object ids.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          svg: { type: 'string', description: 'SVG markup: a full <svg> document or one or more <path> elements.' },
+          artboardId: { type: 'string', description: 'Target artboard. Defaults to the first artboard.' },
+          x: { type: 'number', description: 'Left position of the artwork, local to the artboard (default 0).' },
+          y: { type: 'number', description: 'Top position of the artwork, local to the artboard (default 0).' },
+          scale: { type: 'number', description: 'Uniform scale factor applied to the SVG coordinates (default 1).' },
+          semanticRole: { type: 'string', description: 'Semantic role for the created paths (default decorative).' },
+        },
+        required: ['svg'],
+      },
+      execute({ svg, artboardId, x, y, scale, semanticRole }: { svg?: string; artboardId?: string; x?: number; y?: number; scale?: number; semanticRole?: string } = {}) {
+        if (!svg || typeof svg !== 'string' || !svg.trim()) return text('Provide `svg` markup to draw.')
+        const { ids, error } = addSvgPaths(store, svg, { artboardId, x, y, scale, semanticRole })
+        if (error) {
+          log('Draw SVG failed', { status: 'error' })
+          return text(error)
+        }
+        store.selectObjects(ids)
+        log(`Drew ${ids.length} path${ids.length === 1 ? '' : 's'} from SVG`)
+        return text({ ids, count: ids.length })
       },
     },
 

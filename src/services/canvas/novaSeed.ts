@@ -8,6 +8,9 @@
 // A placeholder fallback keeps the demo working if the file is missing.
 import rawLogo from '@/assets/logoipsum.svg?raw'
 import type { CanvasStore } from '@/stores/canvas'
+import { parsePathData, flattenSubpaths } from './svgToPaths'
+import { nodesBounds, nodesToPathData, translateNodes } from './svgEngine'
+import type { PathNode } from './svgEngine'
 
 export interface SeedViewBox {
   x: number
@@ -229,6 +232,24 @@ export function seedNova(store: CanvasStore, opts: { logoSvg?: string } = {}) {
   const originY = padY - parsed.viewBox.y
 
   for (const desc of parsed.objects) {
+    // Give seeded paths an editable node model (same normalized convention as
+    // pen-drawn / imported paths) so the node tool can reshape the demo logo.
+    // Text and any path we can't parse fall back to the plain offset placement.
+    if (desc.type === 'path' && desc.d) {
+      const payload = buildPathNodesFromData(desc.d, originX, originY)
+      if (payload) {
+        store.addObject({
+          type: 'path',
+          semanticRole: desc.semanticRole,
+          fill: desc.fill,
+          stroke: desc.stroke ?? 'none',
+          strokeWidth: desc.strokeWidth ?? 0,
+          artboardId: artboard.id,
+          ...payload,
+        })
+        continue
+      }
+    }
     store.addObject({
       ...desc,
       artboardId: artboard.id,
@@ -238,4 +259,40 @@ export function seedNova(store: CanvasStore, opts: { logoSvg?: string } = {}) {
   }
 
   return artboard
+}
+
+// Convert a path `d` (in the logo's viewBox coordinates) into a normalized,
+// node-editable path payload placed at (originX, originY) in artboard space.
+// Anchors are rebased so the object origin is the geometry's bbox top-left,
+// matching buildPenNodesPayload / imported-path placement. Compound paths keep
+// their subpaths (glyph holes, joined letters). Returns null for < 2 anchors.
+function buildPathNodesFromData(
+  d: string,
+  originX: number,
+  originY: number,
+): {
+  d: string
+  nodes: PathNode[]
+  closed: boolean
+  subpaths: number[]
+  x: number
+  y: number
+  width: number
+  height: number
+} | null {
+  const { nodes, subpaths, closed } = flattenSubpaths(parsePathData(d))
+  if (nodes.length < 2) return null
+  const placed = translateNodes(nodes, originX, originY)
+  const bounds = nodesBounds(placed)
+  const rel = translateNodes(placed, -bounds.x, -bounds.y)
+  return {
+    d: nodesToPathData(rel, closed, subpaths),
+    nodes: rel,
+    closed,
+    subpaths,
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+  }
 }

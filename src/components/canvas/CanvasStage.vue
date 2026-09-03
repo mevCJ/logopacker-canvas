@@ -39,6 +39,9 @@ import {
   buildShapePayload,
   buildPenNodesPayload,
   canvasPointToScreenRect,
+  nodesBounds,
+  nodesToPathData,
+  translateNodes,
   type Box,
   type PathNode,
   type RenderObject,
@@ -50,6 +53,7 @@ import {
   svgToDataUrl,
   type ClipboardPaste,
 } from '@/services/canvas/pasteTools'
+import { svgToPathObjects } from '@/services/canvas/svgToPaths'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -575,6 +579,9 @@ function placeImage(clientX: number, clientY: number) {
   const pending = store.pendingImage
   if (!pending) return
   const p = renderer.screenToCanvas(clientX, clientY)
+  // A staged SVG converts to editable path objects (node-tool reshapeable),
+  // falling back to the image embed below when nothing is convertible.
+  if (pending.svgMarkup && placeSvgAsPaths(pending.svgMarkup, p, 'Add image')) return
   const artboard = resolveArtboardAtPoint(store.artboards, p)
   store.snapshot('Add image')
   const size = fitImageSize(
@@ -642,12 +649,86 @@ async function pasteImageFile(file: File, point: { x: number; y: number }) {
   store.selectObjects([obj.id])
 }
 
+// Convert imported SVG markup into native, node-editable path objects centered
+// on `point`, so the node tool can reshape their anchors. Every <path> in the
+// markup (with ancestor transforms + viewBox baked in) becomes one PathObject;
+// the whole set is uniformly scaled to fit the artboard and translated under
+// the cursor. Returns false when the markup has no convertible paths so the
+// caller can fall back to embedding it as a single image.
+function placeSvgAsPaths(markup: string, point: { x: number; y: number }, label: string): boolean {
+  const parsed = svgToPathObjects(markup)
+  if (!parsed) return false
+
+  const dims = svgIntrinsicSize(markup)
+  const artboard = resolveArtboardAtPoint(store.artboards, point)
+  const size = fitImageSize(
+    dims,
+    artboard?.width ? artboard.width * 0.9 : 300,
+    artboard?.height ? artboard.height * 0.9 : 300,
+  )
+  // Uniform scale from viewBox units to the fitted display size (fitImageSize
+  // preserves aspect ratio, so sx===sy up to rounding — use one factor).
+  const scale = dims.width ? size.width / dims.width : 1
+  // Top-left of the placed artwork in artboard-local coords: centered on point.
+  const originX = point.x - size.width / 2 - (artboard?.x ?? 0)
+  const originY = point.y - size.height / 2 - (artboard?.y ?? 0)
+  const vb = parsed.viewBox
+
+  store.snapshot(label)
+  const ids: string[] = []
+  for (const p of parsed.paths) {
+    // viewBox coords -> placed coords: subtract the viewBox origin, scale, then
+    // offset to the drop origin. Then rebase each path so its own object origin
+    // (x,y) is its geometry's top-left, matching how pen/shape paths are stored.
+    const placed = p.nodes.map((n) => {
+      const map = (x: number, y: number) => ({
+        x: originX + (x - vb.x) * scale,
+        y: originY + (y - vb.y) * scale,
+      })
+      const a = map(n.x, n.y)
+      const out = { x: a.x, y: a.y, inX: undefined as number | undefined, inY: undefined as number | undefined, outX: undefined as number | undefined, outY: undefined as number | undefined }
+      if (n.inX !== undefined && n.inY !== undefined) {
+        const h = map(n.inX, n.inY)
+        out.inX = h.x
+        out.inY = h.y
+      }
+      if (n.outX !== undefined && n.outY !== undefined) {
+        const h = map(n.outX, n.outY)
+        out.outX = h.x
+        out.outY = h.y
+      }
+      return out
+    })
+    const bounds = nodesBounds(placed)
+    const rel = translateNodes(placed, -bounds.x, -bounds.y)
+    const obj = store.addObject({
+      type: 'path',
+      d: nodesToPathData(rel, p.closed, p.subpaths),
+      nodes: rel,
+      closed: p.closed,
+      subpaths: p.subpaths,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      fill: p.fill,
+      stroke: p.stroke,
+      strokeWidth: p.strokeWidth * scale,
+      artboardId: artboard?.id ?? null,
+      semanticRole: 'decorative',
+    })
+    ids.push(obj.id)
+  }
+  store.selectObjects(ids)
+  return true
+}
+
 function pasteSvgMarkup(markup: string, point: { x: number; y: number }) {
-  // Embed the SVG as a single image object. Splitting it into individual path
-  // objects re-bases each path onto the same origin, which both loses the
-  // internal layout and (because a path's `d` keeps its absolute viewBox
-  // coordinates) offsets the visible geometry away from the drop point. One
-  // image keeps the artwork intact and drops it exactly under the cursor.
+  // Prefer converting to editable path objects so the node tool can reshape the
+  // imported artwork. Falls back to embedding the SVG as one image when nothing
+  // is convertible (no <path>, or only shapes/text/gradients we don't parse).
+  if (placeSvgAsPaths(markup, point, 'Paste SVG')) return
+
   const dims = svgIntrinsicSize(markup)
   const artboard = resolveArtboardAtPoint(store.artboards, point)
   const size = fitImageSize(

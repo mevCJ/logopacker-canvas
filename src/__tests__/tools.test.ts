@@ -92,6 +92,35 @@ describe('WebMCP canvas & object tools', () => {
     expect((store.getObject(symbol.id) as any).d).toBe('M5 5 L9 9')
   })
 
+  it('draw_svg creates node-editable path objects from a full svg', async () => {
+    const before = store.objectOrder.length
+    const svg = '<svg viewBox="0 0 100 100"><path d="M10 10 L90 10 L90 90 Z" fill="#ff0000"/></svg>'
+    const out = parse((await tools.draw_svg!.execute({ svg, artboardId: ab.id, x: 5, y: 5 })) as WebMcpResult)
+    expect(out.count).toBe(1)
+    expect(store.objectOrder.length).toBe(before + 1)
+    const obj = store.getObject(out.ids[0]) as any
+    expect(obj.type).toBe('path')
+    expect(obj.artboardId).toBe(ab.id)
+    expect(obj.fill).toBe('#ff0000')
+    // Converted to a node model so the node tool / other tools can edit it.
+    expect(Array.isArray(obj.nodes)).toBe(true)
+    expect(obj.nodes.length).toBeGreaterThan(0)
+    expect(store.selectedIds).toEqual(out.ids)
+  })
+
+  it('draw_svg accepts a bare path fragment and creates one object per path', async () => {
+    const svg = '<path d="M0 0 L10 0 L10 10 Z"/><path d="M20 20 L30 20 L30 30 Z"/>'
+    const out = parse((await tools.draw_svg!.execute({ svg, artboardId: ab.id })) as WebMcpResult)
+    expect(out.count).toBe(2)
+    expect(out.ids).toHaveLength(2)
+  })
+
+  it('draw_svg reports a clear error when there is no convertible path', async () => {
+    const out = parse((await tools.draw_svg!.execute({ svg: '<svg><rect width="10" height="10"/></svg>', artboardId: ab.id })) as WebMcpResult)
+    expect(out).toMatch(/no convertible/i)
+    expect(steps).toContain('Draw SVG failed')
+  })
+
   it('missing object returns a message, not throw', async () => {
     const out = parse((await tools.get_object!.execute({ id: 'nope' })) as WebMcpResult)
     expect(out).toMatch(/No object/)

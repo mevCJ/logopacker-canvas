@@ -154,6 +154,49 @@ describe('CanvasRenderer — tool overlays', () => {
     expect(xs.size).toBeGreaterThan(1)
   })
 
+  it('sizes node-edit handles in screen pixels (small, zoom-relative)', () => {
+    const obj = {
+      id: 'p1',
+      type: 'path' as const,
+      artboardId: 'ab',
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      baseWidth: 100,
+      baseHeight: 100,
+      rotation: 0,
+      d: 'M0 0 L100 0 L100 100 Z',
+      fill: '#000',
+      nodes: [
+        { x: 0, y: 0 },
+        { x: 100, y: 0 },
+        { x: 100, y: 100 },
+      ],
+      closed: true,
+    }
+    renderer.render({
+      artboards: [{ id: 'ab', x: 0, y: 0, width: 200, height: 200 }],
+      objects: { p1: obj },
+      objectOrder: ['p1'],
+    })
+    renderer.setNodeEditMode(true)
+    renderer.setSelection(['p1'], [obj])
+
+    // One anchor square per node (no data-handle attr, unlike resize handles).
+    const squares = [...host.querySelectorAll('.handle-layer rect')].filter(
+      (r) => !r.getAttribute('data-handle'),
+    )
+    expect(squares.length).toBe(3)
+    // In the test DOM getBoundingClientRect is 0, so the pixel-scale fallback
+    // (vb.width/800 = 1.25) applies: anchor square = 3.5 * 1.25 * 2 = 8.75.
+    // The key regression: it's much smaller than the old vb.width/130 sizing
+    // (~15.4 at this zoom).
+    const w = Number(squares[0]!.getAttribute('width'))
+    expect(w).toBeCloseTo(8.75)
+    expect(w).toBeLessThan(15)
+  })
+
   it('draws no handles for a multi-selection', () => {
     const a = { id: 'a', type: 'path' as const, artboardId: 'ab', x: 0, y: 0, width: 50, height: 50, baseWidth: 50, baseHeight: 50, rotation: 0, d: 'M0 0 H50 V50 H0 Z', fill: '#000' }
     const b = { id: 'b', type: 'path' as const, artboardId: 'ab', x: 80, y: 0, width: 50, height: 50, baseWidth: 50, baseHeight: 50, rotation: 0, d: 'M0 0 H50 V50 H0 Z', fill: '#000' }

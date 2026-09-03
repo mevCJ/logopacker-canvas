@@ -59,6 +59,22 @@ describe('nova-seed — seeding the store', () => {
     for (const o of store.orderedObjects) expect(o.artboardId).toBe(ab.id)
   })
 
+  it('gives seeded paths an editable node model, preserving compound subpaths', () => {
+    seedNova(store, { logoSvg: SAMPLE })
+    const symbol = store.findByRole('logoSymbol')[0]!
+    expect(symbol.type).toBe('path')
+    // The logomark (M10 10 L20 20 Z) is a single subpath with node anchors.
+    expect((symbol as any).nodes?.length).toBeGreaterThanOrEqual(2)
+
+    // The wordmark joins two letter subpaths; it must keep them as a compound
+    // path (2 subpaths) rather than connecting them into one run.
+    const wordmark = store.findByRole('wordmark')[0]! as any
+    expect(wordmark.nodes.length).toBe(4)
+    expect(wordmark.subpaths).toEqual([2, 2])
+    // Its `d` has two M commands (one per subpath), no spurious joining line.
+    expect((wordmark.d.match(/M/g) || []).length).toBe(2)
+  })
+
   it('falls back to placeholder on unparseable svg', () => {
     seedNova(store, { logoSvg: '<not svg' })
     expect(store.findByRole('logoSymbol').length).toBeGreaterThanOrEqual(1)

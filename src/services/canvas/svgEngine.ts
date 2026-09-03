@@ -39,6 +39,7 @@ export interface RenderObject {
   strokeWidth?: number
   nodes?: PathNode[]
   closed?: boolean
+  subpaths?: number[]
   text?: string
   fontFamily?: string
   fontSize?: number
@@ -226,7 +227,30 @@ export interface PathNode {
 // Serialize an ordered list of anchors into SVG path data. A segment uses a
 // cubic curve (C) when either endpoint contributes a handle, else a straight
 // line (L). `closed` connects the last anchor back to the first and appends Z.
-export function nodesToPathData(nodes: PathNode[], closed = false): string {
+//
+// `subpaths` (optional) is the node count of each subpath, letting one flat
+// node list serialize as a compound path (multiple M...Z runs) — e.g. a glyph
+// with a hole, or several letters in one object. When omitted, `nodes` is a
+// single subpath (the original behavior). All subpaths share the `closed` flag.
+export function nodesToPathData(nodes: PathNode[], closed = false, subpaths?: number[]): string {
+  if (!nodes.length) return ''
+  if (!subpaths || subpaths.length <= 1) return subpathToData(nodes, closed)
+  // Slice the flat node list into runs and serialize each as its own subpath.
+  const parts: string[] = []
+  let offset = 0
+  for (const count of subpaths) {
+    if (count <= 0) continue
+    const run = nodes.slice(offset, offset + count)
+    offset += count
+    if (run.length) parts.push(subpathToData(run, closed))
+  }
+  // Any trailing nodes not covered by `subpaths` form a final subpath.
+  if (offset < nodes.length) parts.push(subpathToData(nodes.slice(offset), closed))
+  return parts.join(' ')
+}
+
+// Serialize a single subpath (one M...[segments]...[Z]) from its anchors.
+function subpathToData(nodes: PathNode[], closed: boolean): string {
   const first = nodes[0]
   if (!first) return ''
   let d = `M${num(first.x)} ${num(first.y)}`
@@ -1096,8 +1120,17 @@ export class CanvasRenderer {
     const nodes = this._liveNodes || obj.nodes || []
     if (!el || !nodes.length) return
     const vb = this.getViewBox()
-    const r = Math.max(3, vb.width / 130)
-    const hr = Math.max(2, vb.width / 200)
+    // Size the handles in fixed screen pixels (converted to canvas units via
+    // the current pixel scale) so they stay a small, constant size on screen at
+    // any zoom. Fall back to a viewBox fraction when the pixel scale isn't
+    // measurable (non-DOM/test environments where getBoundingClientRect is 0).
+    const { sx } = this._canvasScale()
+    const perPx = Number.isFinite(sx) && sx > 0 ? sx : vb.width / 800
+    const r = 3.5 * perPx // anchor square half-size (~7px on screen)
+    const hr = 2.5 * perPx // tangent-handle dot half-size (~5px on screen)
+    // Outline stroke in screen pixels too, so it stays proportional to the
+    // (now pixel-sized) handles rather than the passed viewBox-based width.
+    strokeW = perPx
     const t = this._objectTransformParams(obj)
 
     nodes.forEach((n, i) => {
@@ -1177,7 +1210,7 @@ export class CanvasRenderer {
   // element's `d` (base frame) without going through the store.
   private _applyLivePath(el: SvgEl, obj: RenderObject): void {
     if (!this._liveNodes) return
-    el.attr('d', nodesToPathData(this._liveNodes, !!obj.closed))
+    el.attr('d', nodesToPathData(this._liveNodes, !!obj.closed, obj.subpaths))
   }
 
   private _drawSingleSelection(obj: RenderObject, box: Box, strokeW: number): void {

@@ -273,6 +273,19 @@ describe('svgEngine — shape + tool geometry helpers', () => {
     expect(nodesToPathData(smooth)).toBe('M0 0 C0 0 5 10 10 10 C15 10 20 0 20 0')
   })
 
+  it('nodesToPathData emits one M...Z run per subpath for compound paths', () => {
+    // Two triangles in one flat node list, split 3 + 3.
+    const nodes = [
+      { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 },
+      { x: 20, y: 0 }, { x: 30, y: 0 }, { x: 30, y: 10 },
+    ]
+    expect(nodesToPathData(nodes, true, [3, 3])).toBe(
+      'M0 0 L10 0 L10 10 Z M20 0 L30 0 L30 10 Z',
+    )
+    // A single-entry subpaths list behaves like no subpaths.
+    expect(nodesToPathData(nodes.slice(0, 3), true, [3])).toBe('M0 0 L10 0 L10 10 Z')
+  })
+
   it('nodesBounds includes tangent handles, translateNodes shifts everything', () => {
     const nodes = [{ x: 0, y: 0, outX: -5, outY: 8 }, { x: 10, y: 2 }]
     // Bounds must reach the out handle at (-5, 8).

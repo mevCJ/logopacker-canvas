@@ -20,6 +20,7 @@
     "@svgdotjs/svg.resize.js": "2.0.5",
     "@svgdotjs/svg.select.js": "4.0.1",
     "pinia": "3.0.4",
+    "svgpath": "^2.6.0",
     "vue": "^3.5.40",
     "vue-router": "^5.2.0"
   },

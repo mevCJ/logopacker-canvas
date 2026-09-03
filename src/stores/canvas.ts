@@ -36,6 +36,9 @@ export interface PendingImage {
   alt?: string
   width?: number
   height?: number
+  // Raw SVG markup when the staged item is an SVG. Lets the image tool convert
+  // it to editable path objects on placement instead of embedding an image.
+  svgMarkup?: string
 }
 
 // Intentionally small, polished typography set for the demo.
@@ -97,6 +100,10 @@ export interface PathObject extends BaseObject {
   nodes?: PathNode[]
   // Whether the node path is closed (last anchor connects back to the first).
   closed?: boolean
+  // For compound paths: the node count of each subpath, so one flat `nodes`
+  // list serializes as multiple M...Z runs (e.g. a glyph with a hole). Absent
+  // for simple single-subpath paths.
+  subpaths?: number[]
   // Optional primitive discriminator for shapes drawn by the shape tool. Lets
   // the UI offer shape-specific controls (e.g. rectangle corner radius).
   shape?: 'rect' | 'ellipse' | 'line'
@@ -678,12 +685,15 @@ export const useCanvasStore = defineStore('canvas', {
     // place); width/height/base are resynced from the node bounds so the
     // renderer's display->base scale stays 1:1 while editing. No-op for a
     // non-path or a path without a node model.
-    updatePathNodes(id: string, nodes: PathNode[]): CanvasObject | null {
+    updatePathNodes(id: string, nodes: PathNode[], subpaths?: number[]): CanvasObject | null {
       const obj = this.objects[id]
       if (!obj || obj.type !== 'path') return null
       const b = nodesBounds(nodes)
       obj.nodes = nodes
-      obj.d = nodesToPathData(nodes, !!obj.closed)
+      // A node-edit drag moves anchors but not the subpath structure, so keep
+      // the object's existing subpaths unless the caller passes a new layout.
+      if (subpaths !== undefined) obj.subpaths = subpaths
+      obj.d = nodesToPathData(nodes, !!obj.closed, obj.subpaths)
       // Bounds drive the selection box + resize scale; the node coords are kept
       // in the existing frame (may extend past the origin), so d stays aligned.
       obj.width = b.width

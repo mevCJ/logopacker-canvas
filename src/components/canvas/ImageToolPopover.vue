@@ -96,6 +96,7 @@ async function onFile(e: Event) {
     const isSvg = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)
     let href: string
     let size: { width: number; height: number }
+    let svgMarkup: string | undefined
     if (isSvg) {
       // SVGs often declare only a viewBox (no intrinsic width/height), which
       // makes probeImageSize unreliable. Parse the markup for dimensions and
@@ -104,6 +105,8 @@ async function onFile(e: Event) {
       if (!looksLikeSvg(markup)) throw new Error('That file is not valid SVG.')
       href = svgToDataUrl(markup)
       size = svgIntrinsicSize(markup)
+      // Carry the raw markup so placement can convert it to editable paths.
+      svgMarkup = markup
     } else {
       href = await readFileAsDataUrl(file)
       size = await probeImageSize(href)
@@ -114,6 +117,7 @@ async function onFile(e: Event) {
       alt: file.name,
       width: size.width,
       height: size.height,
+      svgMarkup,
     })
     emit('close')
   } catch (err) {
