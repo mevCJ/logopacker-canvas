@@ -13,7 +13,7 @@
     <!-- Upload -->
     <section class="ip-section">
       <label class="ip-upload">
-        <input type="file" accept="image/*" class="ip-file" @change="onFile" />
+        <input type="file" accept="image/*,.svg,image/svg+xml" class="ip-file" @change="onFile" />
         <span>Upload from device</span>
       </label>
     </section>
@@ -60,10 +60,12 @@ import { storeToRefs } from 'pinia'
 import { useCanvasStore } from '@/stores/canvas'
 import {
   readFileAsDataUrl,
+  readFileAsText,
   probeImageSize,
   pexelsResultToPending,
   type PexelsResult,
 } from '@/services/canvas/userTools'
+import { svgIntrinsicSize, svgToDataUrl, looksLikeSvg } from '@/services/canvas/pasteTools'
 
 const props = defineProps<{ anchor?: { left: number; top: number } | null }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -91,8 +93,21 @@ async function onFile(e: Event) {
   if (!file) return
   error.value = ''
   try {
-    const href = await readFileAsDataUrl(file)
-    const size = await probeImageSize(href)
+    const isSvg = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)
+    let href: string
+    let size: { width: number; height: number }
+    if (isSvg) {
+      // SVGs often declare only a viewBox (no intrinsic width/height), which
+      // makes probeImageSize unreliable. Parse the markup for dimensions and
+      // embed it as a UTF-8 data URL instead, matching the paste flow.
+      const markup = await readFileAsText(file)
+      if (!looksLikeSvg(markup)) throw new Error('That file is not valid SVG.')
+      href = svgToDataUrl(markup)
+      size = svgIntrinsicSize(markup)
+    } else {
+      href = await readFileAsDataUrl(file)
+      size = await probeImageSize(href)
+    }
     store.setPendingImage({
       href,
       sourceUrl: file.name,

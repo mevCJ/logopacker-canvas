@@ -74,8 +74,12 @@ watch(
 )
 
 onMounted(() => {
-  // Seed the NOVA primary logo (imports + tags src/assets/logoipsum.svg).
-  if (store.artboards.length === 0) {
+  // Seed the NOVA primary logo (imports + tags src/assets/logoipsum.svg) only
+  // when the page is opened with ?demo=1. Otherwise start with a blank canvas.
+  const demo =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('demo') === '1'
+  if (demo && store.artboards.length === 0) {
     seedNova(store)
   }
   // Register WebMCP tools so an external agent can operate the canvas.

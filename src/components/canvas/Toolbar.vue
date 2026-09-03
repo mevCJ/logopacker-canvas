@@ -1,6 +1,6 @@
 <template>
   <div class="toolbar">
-    <div class="toolbar-brand">NOVA</div>
+    <div class="toolbar-brand">LogoPacker</div>
     <div class="toolbar-actions">
       <button class="tb-btn tb-btn-undo" :disabled="!canUndo" :title="undoTitle" @click="undo">
         {{ undoLabel }}

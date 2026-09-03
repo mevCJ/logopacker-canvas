@@ -65,6 +65,21 @@ export function readFileAsDataUrl(file: File): Promise<string> {
   })
 }
 
+// Read a File into a UTF-8 string. Rejects in non-browser environments. Used
+// for SVG uploads, whose markup we parse for dimensions rather than probing.
+export function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (typeof FileReader === 'undefined') {
+      reject(new Error('FileReader unavailable'))
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('File read failed'))
+    reader.readAsText(file)
+  })
+}
+
 // Probe an image data URL / URL for its natural dimensions.
 export function probeImageSize(src: string): Promise<Size> {
   return new Promise((resolve) => {
