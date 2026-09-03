@@ -2,7 +2,13 @@
 // the canvas/object tools. search_pexels calls the Worker proxy at
 // /api/pexels/search so the API key stays server-side.
 import type { CanvasStore } from '@/stores/canvas'
-import { text, type WebMcpToolDefinition, type ToolLogger } from './webmcp'
+import {
+  text,
+  type WebMcpToolDefinition,
+  type ToolLogger,
+  type FontData,
+  type EyeDropperInstance,
+} from './webmcp'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -14,6 +20,10 @@ async function httpGetJson(url: string): Promise<any> {
 
 export interface ImageTextDeps {
   fetchJson?: (url: string) => Promise<any>
+  // Injectable browser-API hooks (default to the real APIs). Tests override
+  // these; unsupported browsers leave them undefined so the tools no-op safely.
+  queryLocalFonts?: (options?: { postscriptNames?: string[] }) => Promise<FontData[]>
+  createEyeDropper?: () => EyeDropperInstance
 }
 
 export function buildImageTextTools(
@@ -29,6 +39,19 @@ export function buildImageTextTools(
     }
   }
   const fetchJson = deps.fetchJson || ((url: string) => httpGetJson(url))
+
+  // Resolve the experimental browser APIs: prefer injected deps (tests), then
+  // the real window API, else undefined (unsupported browser / SSR / jsdom).
+  const queryLocalFonts =
+    deps.queryLocalFonts ||
+    (typeof window !== 'undefined' && window.queryLocalFonts
+      ? (opts?: { postscriptNames?: string[] }) => window.queryLocalFonts!(opts)
+      : undefined)
+  const createEyeDropper =
+    deps.createEyeDropper ||
+    (typeof window !== 'undefined' && window.EyeDropper
+      ? () => new window.EyeDropper!()
+      : undefined)
 
   return [
     // ---- Typography --------------------------------------------------------
@@ -131,5 +154,111 @@ export function buildImageTextTools(
     },
     // Positioning/resizing an image (x, y, width, height) is handled by the
     // generic set_object_properties tool in tools.ts.
+
+    // ---- Local fonts (Local Font Access API) -------------------------------
+    {
+      name: 'list_local_fonts',
+      description:
+        'Lists fonts actually installed on the user’s machine (via the browser Local Font Access API),' +
+        'Returns an array of { family, fullName, postscriptName, style }. Optionally filter with `query` (case-insensitive substring match on family/fullName) and cap the count with `limit`. ',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Case-insensitive substring to filter font family/name.' },
+          limit: { type: 'number', description: 'Maximum number of fonts to return (default 50).' },
+        },
+      },
+      async execute({ query, limit = 50 }: { query?: string; limit?: number } = {}) {
+        if (!queryLocalFonts) {
+          log('Local fonts unavailable', { status: 'error' })
+          return text(
+            'Local Font Access API is not available in this browser. It requires a Chromium-based browser in a secure context.',
+          )
+        }
+        log('Reading local fonts', { status: 'running' })
+        let fonts: FontData[]
+        try {
+          fonts = await queryLocalFonts()
+        } catch (e) {
+          log('Local font access denied', { status: 'error' })
+          return text(`Could not read local fonts: ${(e as Error)?.message || 'permission denied'}`)
+        }
+        const q = String(query || '').trim().toLowerCase()
+        let list = fonts.map((f) => ({
+          family: f.family,
+          fullName: f.fullName,
+          postscriptName: f.postscriptName,
+          style: f.style,
+        }))
+        if (q) {
+          list = list.filter(
+            (f) => f.family.toLowerCase().includes(q) || f.fullName.toLowerCase().includes(q),
+          )
+        }
+        // De-duplicate by family so the agent sees pickable font families first.
+        const families = [...new Set(list.map((f) => f.family))]
+        const cap = Math.max(1, Math.min(Number(limit) || 50, 200))
+        const trimmed = list.slice(0, cap)
+        log(`Found ${families.length} local font famil${families.length === 1 ? 'y' : 'ies'}`)
+        return text({ totalFaces: list.length, families: families.slice(0, cap), fonts: trimmed })
+      },
+    },
+
+    // ---- Screen color picker (EyeDropper API) ------------------------------
+    // {
+    //   name: 'pick_screen_color',
+    //   description:
+    //     'Opens the browser EyeDropper so the human can click any pixel ANYWHERE on their screen (even outside the app) to sample a color; the chosen hex value is returned to you. ' +
+    //     'Use this human-in-the-loop tool when the user wants to match a brand/reference color you cannot see — e.g. "use the blue from my brand guide". ' +
+    //     'Optionally pass `applyTo` (object ids) and/or `role` to immediately set the sampled color as the fill of those objects. Requires a supported browser (Chromium, secure context) and a user gesture; returns a clear message otherwise.',
+    //   inputSchema: {
+    //     type: 'object',
+    //     properties: {
+    //       applyTo: {
+    //         type: 'array',
+    //         items: { type: 'string' },
+    //         description: 'Optional object ids to fill with the sampled color.',
+    //       },
+    //       role: {
+    //         type: 'string',
+    //         description: 'Optional semanticRole whose objects should be filled with the sampled color.',
+    //       },
+    //     },
+    //   },
+    //   async execute({ applyTo, role }: { applyTo?: string[]; role?: string } = {}) {
+    //     if (!createEyeDropper) {
+    //       log('EyeDropper unavailable', { status: 'error' })
+    //       return text(
+    //         'EyeDropper API is not available in this browser. It requires a Chromium-based browser in a secure context.',
+    //       )
+    //     }
+    //     log('Waiting for the user to pick a color', { status: 'running' })
+    //     let sRGBHex: string
+    //     try {
+    //       const result = await createEyeDropper().open()
+    //       sRGBHex = result.sRGBHex
+    //     } catch (e) {
+    //       // The user pressed Escape or aborted the eyedropper.
+    //       log('Color pick cancelled', { status: 'error' })
+    //       return text(`Color selection was cancelled: ${(e as Error)?.message || 'aborted'}`)
+    //     }
+
+    //     // Resolve any objects to recolor: explicit ids, matching role, else the
+    //     // human's current selection.
+    //     const targets = new Set<string>()
+    //     if (Array.isArray(applyTo)) applyTo.forEach((id) => store.getObject(id) && targets.add(id))
+    //     if (role) store.findByRole(role).forEach((o) => targets.add(o.id))
+    //     const ids = [...targets]
+    //     ids.forEach((id) => store.setFill(id, sRGBHex))
+
+    //     if (ids.length) {
+    //       store.selectObjects(ids)
+    //       log(`Picked ${sRGBHex} and filled ${ids.length} object(s)`)
+    //     } else {
+    //       log(`Picked color ${sRGBHex}`)
+    //     }
+    //     return text({ color: sRGBHex, applied: ids })
+    //   },
+    // },
   ]
 }

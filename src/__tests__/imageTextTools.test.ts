@@ -94,4 +94,73 @@ describe('WebMCP typography & image tools', () => {
     expect((store.getObject(out.id) as any).href).toBe('s1')
     expect(parse((await tools.add_image!.execute({ artboardId: ab.id })) as WebMcpResult)).toMatch(/requires src/)
   })
+
+  it('list_local_fonts returns filtered families via injected queryLocalFonts', async () => {
+    const fonts = [
+      { family: 'Inter', fullName: 'Inter Regular', postscriptName: 'Inter-Regular', style: 'Regular' },
+      { family: 'Inter', fullName: 'Inter Bold', postscriptName: 'Inter-Bold', style: 'Bold' },
+      { family: 'Arial', fullName: 'Arial', postscriptName: 'ArialMT', style: 'Regular' },
+    ]
+    const tools = build({ queryLocalFonts: async () => fonts })
+    const out = parse((await tools.list_local_fonts!.execute({ query: 'inter' })) as WebMcpResult)
+    expect(out.families).toEqual(['Inter'])
+    expect(out.fonts).toHaveLength(2)
+    expect(steps.some((s) => s.includes('local font'))).toBe(true)
+  })
+
+  it('list_local_fonts reports unavailability when the API is missing', async () => {
+    // No injected dep and jsdom has no window.queryLocalFonts.
+    const tools = build()
+    const out = parse((await tools.list_local_fonts!.execute({})) as WebMcpResult)
+    expect(out).toMatch(/not available/i)
+  })
+
+  it('list_local_fonts surfaces a denied permission', async () => {
+    const tools = build({
+      queryLocalFonts: async () => {
+        throw new Error('permission denied')
+      },
+    })
+    const out = parse((await tools.list_local_fonts!.execute({})) as WebMcpResult)
+    expect(out).toMatch(/could not read local fonts/i)
+  })
+
+  it('pick_screen_color returns the sampled hex and fills targets by role', async () => {
+    const pathObj = store.addObject({ type: 'path', artboardId: ab.id, semanticRole: 'logoSymbol' })
+    const tools = build({
+      createEyeDropper: () => ({ open: async () => ({ sRGBHex: '#3366ff' }) }),
+    })
+    const out = parse((await tools.pick_screen_color!.execute({ role: 'logoSymbol' })) as WebMcpResult)
+    expect(out.color).toBe('#3366ff')
+    expect(out.applied).toEqual([pathObj.id])
+    expect((store.getObject(pathObj.id) as any).fill).toBe('#3366ff')
+  })
+
+  it('pick_screen_color returns a color without targets', async () => {
+    const tools = build({
+      createEyeDropper: () => ({ open: async () => ({ sRGBHex: '#abcdef' }) }),
+    })
+    const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
+    expect(out.color).toBe('#abcdef')
+    expect(out.applied).toEqual([])
+  })
+
+  it('pick_screen_color handles cancellation (Escape)', async () => {
+    const tools = build({
+      createEyeDropper: () => ({
+        open: async () => {
+          throw new Error('AbortError')
+        },
+      }),
+    })
+    const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
+    expect(out).toMatch(/cancelled/i)
+    expect(steps).toContain('Color pick cancelled')
+  })
+
+  it('pick_screen_color reports unavailability when the API is missing', async () => {
+    const tools = build()
+    const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
+    expect(out).toMatch(/not available/i)
+  })
 })

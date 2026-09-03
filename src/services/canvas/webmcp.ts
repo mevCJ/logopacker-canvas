@@ -23,9 +23,33 @@ export interface ModelContext {
   executeTool?: (name: string, args: unknown) => Promise<unknown>
 }
 
+// --- Experimental browser APIs used by agent tools -------------------------
+// These are Chromium-only and gated to secure contexts; the tools that use
+// them feature-detect at call time and degrade gracefully elsewhere.
+
+// EyeDropper API (https://developer.mozilla.org/docs/Web/API/EyeDropper_API)
+export interface EyeDropperOpenResult {
+  sRGBHex: string
+}
+export interface EyeDropperInstance {
+  open: (options?: { signal?: AbortSignal }) => Promise<EyeDropperOpenResult>
+}
+
+// Local Font Access API (https://developer.mozilla.org/docs/Web/API/Local_Font_Access_API)
+export interface FontData {
+  postscriptName: string
+  fullName: string
+  family: string
+  style: string
+}
+
 declare global {
   interface Document {
     modelContext?: ModelContext
+  }
+  interface Window {
+    EyeDropper?: { new (): EyeDropperInstance }
+    queryLocalFonts?: (options?: { postscriptNames?: string[] }) => Promise<FontData[]>
   }
 }
 
