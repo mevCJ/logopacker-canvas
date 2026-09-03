@@ -5,6 +5,15 @@
       @fit-view="fitView"
       @toggle-activity="showActivity = !showActivity"
       @export="showExport = !showExport"
+      @save="saveDocument"
+      @load="openLoadPicker"
+    />
+    <input
+      ref="fileInput"
+      type="file"
+      accept="application/json,.json"
+      class="visually-hidden"
+      @change="onFileChosen"
     />
     <div class="canvas-body">
       <CanvasStage ref="stage" class="canvas-stage-host" />
@@ -27,6 +36,7 @@ import { useCanvasStore } from '@/stores/canvas'
 import { seedNova } from '@/services/canvas/novaSeed'
 import { registerCanvasTools } from '@/services/canvas/tools'
 import { buildImageTextTools } from '@/services/canvas/imageTextTools'
+import { saveDocumentToFile, parseDocumentFile } from '@/services/canvas/documentIO'
 import CanvasStage from '@/components/canvas/CanvasStage.vue'
 import Toolbar from '@/components/canvas/Toolbar.vue'
 import ToolSidebar from '@/components/canvas/ToolSidebar.vue'
@@ -39,6 +49,7 @@ const store = useCanvasStore()
 const stage = ref<{ fitViewBox: () => void } | null>(null)
 const showActivity = ref(false)
 const showExport = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
 let unregisterTools: (() => void) | null = null
 
 const imagePicker = reactive<{ open: boolean; anchor: { left: number; top: number } | null }>({
@@ -48,6 +59,32 @@ const imagePicker = reactive<{ open: boolean; anchor: { left: number; top: numbe
 
 function fitView() {
   stage.value?.fitViewBox()
+}
+
+// Serialize the whole document and download it as a .json file.
+function saveDocument() {
+  saveDocumentToFile(store.serializeDocument())
+}
+
+// Open the hidden file picker to load a saved document.
+function openLoadPicker() {
+  fileInput.value?.click()
+}
+
+// Parse the chosen file and replace the current document. Resets the input so
+// picking the same file again still fires a change event.
+async function onFileChosen(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    const doc = await parseDocumentFile(file)
+    store.loadDocument(doc)
+    fitView()
+  } catch (err) {
+    window.alert((err as Error)?.message || 'Could not open that file.')
+  }
 }
 
 // Open the image picker anchored just to the right of the image tool button.
@@ -96,6 +133,17 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .canvas-page {
   display: flex;
   flex-direction: column;

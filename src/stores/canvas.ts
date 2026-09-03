@@ -165,6 +165,22 @@ interface SerializedState {
   selectedArtboardId: string | null
 }
 
+// Bump when the saved-document shape changes in a breaking way.
+export const DOCUMENT_VERSION = 1
+
+// The full, self-contained document written to / read from a .json file.
+// Everything here is plain JSON — image data lives inline on objects (data:
+// URLs for uploads, remote URLs for stock images), so a saved file reloads
+// without any external dependencies beyond fonts and still-reachable URLs.
+export interface CanvasDocument {
+  version: number
+  artboards: Artboard[]
+  objects: Record<string, CanvasObject>
+  objectOrder: string[]
+  viewport: { x: number; y: number; zoom: number }
+  idCounter: number
+}
+
 export interface CanvasState {
   artboards: Artboard[]
   objects: Record<string, CanvasObject>
@@ -250,6 +266,25 @@ let measureObjectBox: ObjectBoxMeasurer | null = null
 
 export function setObjectBoxMeasurer(fn: ObjectBoxMeasurer | null): void {
   measureObjectBox = fn
+}
+
+// Viewport control lives in the renderer (it owns the SVG viewBox), not the
+// store. The renderer host (CanvasStage) registers a controller here so that
+// WebMCP tools — which only have the store — can drive the viewport. `fitBox`
+// frames the given canvas-space box (with optional padding as a fraction of the
+// box's larger side) into view. Absent in non-DOM/test environments.
+export interface ViewportController {
+  fitBox: (box: Box, opts?: { paddingRatio?: number }) => void
+}
+
+let viewportController: ViewportController | null = null
+
+export function setViewportController(controller: ViewportController | null): void {
+  viewportController = controller
+}
+
+export function getViewportController(): ViewportController | null {
+  return viewportController
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +878,84 @@ export const useCanvasStore = defineStore('canvas', {
 
     canUndo(): boolean {
       return this.history.length > 0
+    },
+
+    // ---- Document save / load ----------------------------------------------
+    // Serialize the full persistable document: the artwork (artboards, objects,
+    // order) plus viewport and the id counter so ids stay unique after a load.
+    // Excludes transient/session state (history, activity log, active tool,
+    // pending image, selection) — those don't belong in a saved file.
+    serializeDocument(): CanvasDocument {
+      return {
+        version: DOCUMENT_VERSION,
+        artboards: JSON.parse(JSON.stringify(this.artboards)),
+        objects: JSON.parse(JSON.stringify(this.objects)),
+        objectOrder: [...this.objectOrder],
+        viewport: { ...this.viewport },
+        idCounter: this._idCounter,
+      }
+    },
+
+    // Replace the current document with a loaded one. Validates defensively
+    // since file input is untrusted: keeps only objects present in the map,
+    // drops dangling order/objectIds refs, and clamps the id counter so new
+    // ids never collide with restored ones. Clears undo history and selection.
+    loadDocument(doc: CanvasDocument): void {
+      if (!doc || typeof doc !== 'object') {
+        throw new Error('Invalid document: expected an object.')
+      }
+      if (doc.version !== DOCUMENT_VERSION) {
+        throw new Error(
+          `Unsupported document version ${String(doc.version)} (expected ${DOCUMENT_VERSION}).`,
+        )
+      }
+
+      const objects: Record<string, CanvasObject> = JSON.parse(
+        JSON.stringify(doc.objects || {}),
+      )
+      const validObjectId = (id: string) => !!objects[id]
+
+      const artboards: Artboard[] = (
+        JSON.parse(JSON.stringify(doc.artboards || [])) as Artboard[]
+      ).map((ab) => ({
+        ...ab,
+        objectIds: (ab.objectIds || []).filter(validObjectId),
+      }))
+
+      // Global paint order: keep only known ids, then append any object that
+      // was left out of the saved order so nothing silently disappears.
+      const order = (doc.objectOrder || []).filter(validObjectId)
+      for (const id of Object.keys(objects)) {
+        if (!order.includes(id)) order.push(id)
+      }
+
+      // Repair each object's artboardId to a still-existing artboard.
+      const artboardIds = new Set(artboards.map((a) => a.id))
+      for (const obj of Object.values(objects)) {
+        if (obj.artboardId && !artboardIds.has(obj.artboardId)) {
+          obj.artboardId = null
+        }
+      }
+
+      this.artboards = artboards
+      this.objects = objects
+      this.objectOrder = order
+      this.selectedIds = []
+      this.selectedArtboardId = null
+
+      const vp = doc.viewport
+      this.viewport =
+        vp && typeof vp.x === 'number' && typeof vp.y === 'number' && typeof vp.zoom === 'number'
+          ? { x: vp.x, y: vp.y, zoom: vp.zoom }
+          : { x: 0, y: 0, zoom: 1 }
+
+      // Ensure future ids never collide with restored ones.
+      const restoredCounter = typeof doc.idCounter === 'number' ? doc.idCounter : 0
+      this._idCounter = Math.max(restoredCounter, this._idCounter)
+
+      // A load is a fresh document — undo history and tool state don't carry over.
+      this.history = []
+      this.resetToolState()
     },
 
     // ---- Agent activity log ------------------------------------------------

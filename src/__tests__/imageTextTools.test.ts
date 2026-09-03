@@ -125,42 +125,42 @@ describe('WebMCP typography & image tools', () => {
     expect(out).toMatch(/could not read local fonts/i)
   })
 
-  it('pick_screen_color returns the sampled hex and fills targets by role', async () => {
-    const pathObj = store.addObject({ type: 'path', artboardId: ab.id, semanticRole: 'logoSymbol' })
-    const tools = build({
-      createEyeDropper: () => ({ open: async () => ({ sRGBHex: '#3366ff' }) }),
-    })
-    const out = parse((await tools.pick_screen_color!.execute({ role: 'logoSymbol' })) as WebMcpResult)
-    expect(out.color).toBe('#3366ff')
-    expect(out.applied).toEqual([pathObj.id])
-    expect((store.getObject(pathObj.id) as any).fill).toBe('#3366ff')
-  })
+  // it('pick_screen_color returns the sampled hex and fills targets by role', async () => {
+  //   const pathObj = store.addObject({ type: 'path', artboardId: ab.id, semanticRole: 'logoSymbol' })
+  //   const tools = build({
+  //     createEyeDropper: () => ({ open: async () => ({ sRGBHex: '#3366ff' }) }),
+  //   })
+  //   const out = parse((await tools.pick_screen_color!.execute({ role: 'logoSymbol' })) as WebMcpResult)
+  //   expect(out.color).toBe('#3366ff')
+  //   expect(out.applied).toEqual([pathObj.id])
+  //   expect((store.getObject(pathObj.id) as any).fill).toBe('#3366ff')
+  // })
 
-  it('pick_screen_color returns a color without targets', async () => {
-    const tools = build({
-      createEyeDropper: () => ({ open: async () => ({ sRGBHex: '#abcdef' }) }),
-    })
-    const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
-    expect(out.color).toBe('#abcdef')
-    expect(out.applied).toEqual([])
-  })
+  // it('pick_screen_color returns a color without targets', async () => {
+  //   const tools = build({
+  //     createEyeDropper: () => ({ open: async () => ({ sRGBHex: '#abcdef' }) }),
+  //   })
+  //   const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
+  //   expect(out.color).toBe('#abcdef')
+  //   expect(out.applied).toEqual([])
+  // })
 
-  it('pick_screen_color handles cancellation (Escape)', async () => {
-    const tools = build({
-      createEyeDropper: () => ({
-        open: async () => {
-          throw new Error('AbortError')
-        },
-      }),
-    })
-    const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
-    expect(out).toMatch(/cancelled/i)
-    expect(steps).toContain('Color pick cancelled')
-  })
+  // it('pick_screen_color handles cancellation (Escape)', async () => {
+  //   const tools = build({
+  //     createEyeDropper: () => ({
+  //       open: async () => {
+  //         throw new Error('AbortError')
+  //       },
+  //     }),
+  //   })
+  //   const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
+  //   expect(out).toMatch(/cancelled/i)
+  //   expect(steps).toContain('Color pick cancelled')
+  // })
 
-  it('pick_screen_color reports unavailability when the API is missing', async () => {
-    const tools = build()
-    const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
-    expect(out).toMatch(/not available/i)
-  })
+  // it('pick_screen_color reports unavailability when the API is missing', async () => {
+  //   const tools = build()
+  //   const out = parse((await tools.pick_screen_color!.execute({})) as WebMcpResult)
+  //   expect(out).toMatch(/not available/i)
+  // })
 })

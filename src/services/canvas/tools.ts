@@ -3,7 +3,7 @@
 // Tools are registered via `document.modelContext.registerTool(...)`. Each
 // tool's execute() maps to a Pinia store action (the source of truth), appends
 // a step to the agent activity log, and returns { content: [{ type, text }] }.
-import type { CanvasStore, CanvasObject, Artboard } from '@/stores/canvas'
+import { getViewportController, type CanvasStore, type CanvasObject, type Artboard } from '@/stores/canvas'
 import { text, type WebMcpToolDefinition, type ToolLogger } from './webmcp'
 import { svgToPathObjects } from './svgToPaths'
 import { nodesBounds, nodesToPathData, translateNodes, type PathNode } from './svgEngine'
@@ -655,6 +655,39 @@ export function buildCanvasTools(
         store.arrangeArtboards({ columns, gap })
         log('Arranged artboards')
         return text({ arranged: true, columns })
+      },
+    },
+    {
+      name: 'zoom_to_artboard',
+      description:
+        'Zooms and pans the canvas viewport to frame a single artboard so it fills the view. Use this to focus on the artboard you are working on so the human can see it. Optionally add padding (a fraction of the artboard size, e.g. 0.1 for 10% margin on each side). Does nothing in headless environments without a live canvas.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artboardId: { type: 'string' },
+          padding: {
+            type: 'number',
+            description: 'Margin around the artboard as a fraction of its larger side (default 0.1).',
+          },
+        },
+        required: ['artboardId'],
+      },
+      execute({ artboardId, padding = 0.1 }: { artboardId?: string; padding?: number } = {}) {
+        const artboard = artboardId ? store.getArtboard(artboardId) : null
+        if (!artboard) return text(`No artboard found with id ${artboardId}`)
+
+        const controller = getViewportController()
+        if (!controller) {
+          log('Zoom unavailable (no live canvas)', { status: 'error' })
+          return text('Viewport control is not available (no live canvas is mounted).')
+        }
+
+        controller.fitBox(
+          { x: artboard.x, y: artboard.y, width: artboard.width, height: artboard.height },
+          { paddingRatio: padding },
+        )
+        log(`Zoomed to ${artboard.name}`)
+        return text({ zoomedTo: artboard.id, name: artboard.name })
       },
     },
   ]

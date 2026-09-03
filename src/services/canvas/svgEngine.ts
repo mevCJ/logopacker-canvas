@@ -112,11 +112,26 @@ export function pathAttrs(obj: RenderObject): Record<string, string | number> {
   }
 }
 
+// Coerce a font-weight into a value the CSS/SVG engine honors. Accepts numbers
+// (400), numeric strings ("700"), and the CSS keywords "normal"/"bold". Unknown
+// values fall back to 400 so text never renders weightless.
+export function normalizeFontWeight(weight: unknown): number | string {
+  if (typeof weight === 'number' && Number.isFinite(weight)) return weight
+  if (typeof weight === 'string') {
+    const s = weight.trim().toLowerCase()
+    if (s === 'bold') return 700
+    if (s === 'normal') return 400
+    const n = Number(s)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return 400
+}
+
 export function textAttrs(obj: RenderObject): Record<string, string | number> {
   return {
     'font-family': obj.fontFamily || 'Inter',
     'font-size': obj.fontSize || 24,
-    'font-weight': obj.fontWeight || 400,
+    'font-weight': normalizeFontWeight(obj.fontWeight),
     fill: obj.fill == null ? '#000000' : obj.fill,
     'text-anchor': alignToAnchor(obj.align),
     opacity: obj.opacity == null ? 1 : obj.opacity,
@@ -1608,6 +1623,19 @@ export class CanvasRenderer {
     } else if (obj.type === 'text') {
       el.text(obj.text || '')
       el.attr(textAttrs(obj))
+      // Apply typography as INLINE STYLE, not just presentation attributes.
+      // The global reset (`*, *::before, *::after { font-weight: normal }` in
+      // base.css) sets font-weight via a CSS selector, which beats an SVG
+      // presentation attribute (`font-weight="700"`). Inline style has higher
+      // priority than that selector, so the requested weight/family/size win.
+      // `fontWeight` may arrive as a keyword ("bold") or number; normalize it.
+      if (typeof (el as any).css === 'function') {
+        ;(el as any).css({
+          'font-family': obj.fontFamily || 'Inter',
+          'font-size': `${obj.fontSize || 24}px`,
+          'font-weight': normalizeFontWeight(obj.fontWeight),
+        })
+      }
       // Text carries its size via fontSize (no scale distortion); only rotate.
       // Rotate about the glyph bbox center so rotation anchors on the visible text.
       el.attr({ x: 0, y: obj.fontSize || 24 })

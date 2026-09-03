@@ -34,6 +34,8 @@
       >
         <IconAgent :is-outline="!activityOpen"></IconAgent>
       </button>
+      <button class="tb-btn" title="Open a saved document" @click="emit('load')">Open</button>
+      <button class="tb-btn" title="Save document to a file" @click="emit('save')">Save</button>
       <button class="tb-btn tb-btn--cta" title="Export" @click="emit('export')">Export</button>
     </div>
   </div>
@@ -49,6 +51,8 @@ const emit = defineEmits<{
   (e: 'fit-view'): void
   (e: 'toggle-activity'): void
   (e: 'export'): void
+  (e: 'save'): void
+  (e: 'load'): void
 }>()
 
 defineProps<{ activityOpen?: boolean }>()

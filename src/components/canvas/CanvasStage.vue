@@ -25,7 +25,12 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useCanvasStore, setObjectBoxMeasurer, type ToolId } from '@/stores/canvas'
+import {
+  useCanvasStore,
+  setObjectBoxMeasurer,
+  setViewportController,
+  type ToolId,
+} from '@/stores/canvas'
 import {
   CanvasRenderer,
   documentBounds,
@@ -64,6 +69,10 @@ const { artboards, objects, objectOrder, selectedIds, selectedArtboardId, active
 const mount = ref<HTMLElement | null>(null)
 let renderer: CanvasRenderer | null = null
 let baseBounds: Box = { x: 0, y: 0, width: 1000, height: 700 }
+
+// In-flight viewBox animation frame id (for smooth zoom transitions). Any
+// direct viewport interaction cancels it so manual input takes over instantly.
+let viewBoxAnimId: number | null = null
 
 const isPanning = ref(false)
 let panStart: { clientX: number; clientY: number; box: Box; moved: boolean } | null = null
@@ -218,10 +227,89 @@ function onObjectRotated(id: string, degrees: number) {
   store.rotateObject(id, degrees)
 }
 
+// Recompute the document bounds used for zoom clamping. Does NOT touch the
+// viewBox, so the user's/agent's current zoom & pan are preserved when the
+// document changes (objects added, artboards moved, etc.).
+function refreshBaseBounds() {
+  baseBounds = documentBounds(store.artboards)
+}
+
+// Reset the viewport to frame the whole document. Used on initial mount and as
+// a deliberate "fit all" action — not on every document mutation.
 function fitViewBox() {
   if (!renderer) return
-  baseBounds = documentBounds(store.artboards)
+  refreshBaseBounds()
   renderer.setViewBox(baseBounds)
+}
+
+// Cancel any in-flight smooth-zoom animation. Called before a fresh animation
+// and by any direct viewport interaction (wheel/pan) so manual input wins.
+function cancelViewBoxAnimation() {
+  if (viewBoxAnimId !== null) {
+    cancelAnimationFrame(viewBoxAnimId)
+    viewBoxAnimId = null
+  }
+}
+
+// Smoothly tween the renderer's viewBox from its current value to `target`
+// over `duration` ms using an ease-in-out curve. Interpolating x/y/width/height
+// linearly (with eased time) reads as a natural pan-and-zoom between frames.
+function animateViewBox(target: Box, duration = 350) {
+  if (!renderer) return
+  cancelViewBoxAnimation()
+  const from = renderer.getViewBox()
+  // Skip the animation when there's effectively nothing to move (or in
+  // environments without rAF, e.g. tests) — just snap to the target.
+  const negligible =
+    Math.abs(from.x - target.x) < 0.5 &&
+    Math.abs(from.y - target.y) < 0.5 &&
+    Math.abs(from.width - target.width) < 0.5 &&
+    Math.abs(from.height - target.height) < 0.5
+  if (negligible || typeof requestAnimationFrame === 'undefined') {
+    renderer.setViewBox(target)
+    return
+  }
+  const start = performance.now()
+  const ease = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
+  const step = (now: number) => {
+    if (!renderer) return
+    const t = Math.min(1, (now - start) / duration)
+    const k = ease(t)
+    renderer.setViewBox({
+      x: from.x + (target.x - from.x) * k,
+      y: from.y + (target.y - from.y) * k,
+      width: from.width + (target.width - from.width) * k,
+      height: from.height + (target.height - from.height) * k,
+    })
+    if (t < 1) {
+      viewBoxAnimId = requestAnimationFrame(step)
+    } else {
+      viewBoxAnimId = null
+    }
+  }
+  viewBoxAnimId = requestAnimationFrame(step)
+}
+
+// Frame a canvas-space box into view, adding uniform padding as a fraction of
+// the box's larger side, then clamp to the allowed zoom range. Animates the
+// transition for a smooth glide between artboards. Used by the zoom_to_artboard
+// WebMCP tool via the store's viewport controller.
+function fitBoxToView(box: Box, opts: { paddingRatio?: number; animate?: boolean } = {}) {
+  if (!renderer) return
+  const pad = Math.max(0, opts.paddingRatio ?? 0.1) * Math.max(box.width, box.height)
+  const padded: Box = {
+    x: box.x - pad,
+    y: box.y - pad,
+    width: box.width + pad * 2,
+    height: box.height + pad * 2,
+  }
+  const target = clampZoom(padded, baseBounds)
+  if (opts.animate === false) {
+    cancelViewBoxAnimation()
+    renderer.setViewBox(target)
+  } else {
+    animateViewBox(target)
+  }
 }
 
 // --- Interaction: object selection wiring ---------------------------------
@@ -278,6 +366,7 @@ function onArtboardResized(
 // --- Interaction: zoom (wheel) --------------------------------------------
 function onWheel(e: WheelEvent) {
   if (!renderer) return
+  cancelViewBoxAnimation()
   const focal = renderer.screenToCanvas(e.clientX, e.clientY)
   const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
   let box = zoomViewBox(renderer.getViewBox(), factor, focal)
@@ -292,6 +381,7 @@ function onMouseDown(e: MouseEvent) {
   if (!renderer) return
   if (e.button !== 0) return
 
+  cancelViewBoxAnimation()
   const tool = store.activeTool
 
   // Pen has its own press-drag-release cycle: press places an anchor, dragging
@@ -928,9 +1018,19 @@ onMounted(() => {
   renderer.onPathNodesChanged = onPathNodesChanged
   // Let the store measure true rendered geometry (e.g. for fit-to-artwork).
   setObjectBoxMeasurer((obj) => (renderer ? renderer.measureObjectBox(obj as any) : null))
+  // Let WebMCP tools (which only have the store) drive the viewport.
+  setViewportController({ fitBox: (box, o) => fitBoxToView(box, o) })
   renderer.setNodeEditMode(store.activeTool === 'node')
   rerender()
   fitViewBox()
+  // Text may paint before the Inter web font finishes loading, leaving glyphs
+  // in a fallback face (wrong family/weight) and mis-measured selection boxes.
+  // Re-render once the fonts are ready so text picks up the real face.
+  if (typeof document !== 'undefined' && (document as any).fonts?.ready) {
+    ;(document as any).fonts.ready.then(() => {
+      if (renderer) rerender()
+    })
+  }
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
   window.addEventListener('paste', handlePaste)
@@ -944,7 +1044,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('paste', handlePaste)
+  cancelViewBoxAnimation()
   setObjectBoxMeasurer(null)
+  setViewportController(null)
   if (renderer) renderer.destroy()
   renderer = null
 })
@@ -971,10 +1073,12 @@ watch(selectedArtboardId, () => {
   if (renderer) renderer.setArtboardSelection(store.selectedArtboardId)
 })
 
+// When the document changes, keep the zoom-clamp bounds current but preserve
+// the current viewport (don't snap back to fit-all on every agent/human edit).
 watch(
   artboards,
   () => {
-    fitViewBox()
+    refreshBaseBounds()
   },
   { deep: true },
 )
