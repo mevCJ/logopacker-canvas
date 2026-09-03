@@ -8,7 +8,6 @@
       <span class="tb-sep" />
       <button class="tb-btn" title="Add artboard" @click="addArtboard">Add artboard</button>
       <button class="tb-btn" title="Fit view" @click="emit('fit-view')">Fit view</button>
-      <button class="tb-btn" title="Export" @click="emit('export')">Export</button>
       <span class="tb-sep" />
       <button class="tb-btn" :disabled="!hasSelection" title="Duplicate (Cmd/Ctrl+D)" @click="duplicate">
         Duplicate
@@ -28,12 +27,12 @@
       <span class="tb-sep" />
       <button
         class="tb-btn"
-        :class="{ 'tb-btn-active': activityOpen }"
         :title="activityOpen ? 'Hide agent activity' : 'Show agent activity'"
         @click="emit('toggle-activity')"
       >
-        Agent activity
+        <IconAgent :is-outline="!activityOpen"></IconAgent>
       </button>
+      <button class="tb-btn" title="Export" @click="emit('export')">Export</button>
     </div>
   </div>
 </template>
@@ -42,6 +41,7 @@
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useCanvasStore } from '@/stores/canvas'
+import IconAgent from '../icons/IconAgent.vue';
 
 const emit = defineEmits<{
   (e: 'fit-view'): void

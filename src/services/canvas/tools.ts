@@ -188,7 +188,7 @@ export function buildCanvasTools(
     {
       name: 'get_object',
       description:
-        'Returns a compact human-readable view of a single object by id (type, semanticRole, geometry, style, and path data d for paths). For editing, prefer get_object_properties, which also lists the exact keys you may set.',
+        'Returns the full compact view of a single object by id, including path data (d) for path objects.',
       inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       execute({ id }: { id: string }) {
         const o = store.getObject(id)
@@ -198,6 +198,30 @@ export function buildCanvasTools(
         return text(view)
       },
     },
+    {
+      name: 'inspect_path',
+      description:
+        'Returns the vector path details of a path object: raw path data (d), fill, stroke, strokeWidth, opacity, semanticRole, and position.',
+      inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      execute({ id }: { id: string }) {
+        const o = store.getObject(id)
+        if (!o) return text(`No object with id ${id}`)
+        if (o.type !== 'path') return text(`Object ${id} is not a path (type=${o.type}).`)
+        log('Inspected path')
+        return text({
+          id: o.id,
+          semanticRole: o.semanticRole,
+          d: o.d,
+          fill: o.fill,
+          stroke: o.stroke,
+          strokeWidth: o.strokeWidth,
+          opacity: o.opacity,
+          x: o.x,
+          y: o.y,
+        })
+      },
+    },
+
     // ---- Selection ---------------------------------------------------------
     {
       name: 'get_selection',
@@ -392,7 +416,7 @@ export function buildCanvasTools(
     {
       name: 'set_path_data',
       description:
-        'Replaces the vector path data (d attribute) of a path object. Use get_object first to read the current d.',
+        'Replaces the vector path data (d attribute) of a path object. Use inspect_path first to read the current d.',
       inputSchema: {
         type: 'object',
         properties: { id: { type: 'string' }, d: { type: 'string', description: 'New SVG path data.' } },

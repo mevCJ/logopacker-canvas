@@ -51,8 +51,8 @@ describe('WebMCP canvas & object tools', () => {
     expect(steps).toContain('Inspected canvas')
   })
 
-  it('get_object exposes path d + style', async () => {
-    const out = parse((await tools.get_object!.execute({ id: symbol.id })) as WebMcpResult)
+  it('inspect_path exposes d + style', async () => {
+    const out = parse((await tools.inspect_path!.execute({ id: symbol.id })) as WebMcpResult)
     expect(out.d).toBe('M0 0 L10 10 Z')
     expect(out.fill).toBe('#3754FA')
   })
