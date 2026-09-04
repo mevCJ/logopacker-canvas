@@ -36,6 +36,7 @@ import { useCanvasStore } from '@/stores/canvas'
 import { seedNova } from '@/services/canvas/novaSeed'
 import { registerCanvasTools } from '@/services/canvas/tools'
 import { buildImageTextTools } from '@/services/canvas/imageTextTools'
+import { buildFileSystemTools } from '@/services/canvas/fileSystemTools'
 import { saveDocumentToFile, parseDocumentFile } from '@/services/canvas/documentIO'
 import CanvasStage from '@/components/canvas/CanvasStage.vue'
 import Toolbar from '@/components/canvas/Toolbar.vue'
@@ -121,7 +122,7 @@ onMounted(() => {
   }
   // Register WebMCP tools so an external agent can operate the canvas.
   unregisterTools = registerCanvasTools(store, {
-    extraTools: (s, logger) => buildImageTextTools(s, logger),
+    extraTools: (s, logger) => [...buildImageTextTools(s, logger), ...buildFileSystemTools(s, logger)],
   })
 })
 

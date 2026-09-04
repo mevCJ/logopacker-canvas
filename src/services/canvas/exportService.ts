@@ -34,9 +34,14 @@ export function downloadBlob(blob: Blob, filename: string): void {
 // SVG export
 // ---------------------------------------------------------------------------
 
+// Blob seam: produce the export blob without downloading, so callers that write
+// to disk (File System Access tools) reuse the exact same output as downloads.
+export function svgToBlob(svgString: string): Blob {
+  return new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' })
+}
+
 export function exportSvg({ svgString, filename }: { svgString: string; filename: string }): void {
-  const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' })
-  downloadBlob(blob, filename)
+  downloadBlob(svgToBlob(svgString), filename)
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +204,20 @@ export interface ExportPngResult {
   failed: string[]
 }
 
+// Blob seam: inline remote images then rasterize to a PNG blob, without
+// downloading. Shared by exportPng (download) and the disk-writing tools.
+export async function renderPngBlob({
+  svgString,
+  width,
+  height,
+  scale = 1,
+  background = null,
+}: RasterizeInput): Promise<{ blob: Blob; failed: string[] }> {
+  const { svg, failed } = await inlineRemoteImages(svgString)
+  const blob = await rasterizeSvg({ svgString: svg, width, height, scale, background })
+  return { blob, failed }
+}
+
 export async function exportPng({
   svgString,
   width,
@@ -207,8 +226,7 @@ export async function exportPng({
   background = null,
   filename,
 }: ExportPngInput): Promise<ExportPngResult> {
-  const { svg, failed } = await inlineRemoteImages(svgString)
-  const blob = await rasterizeSvg({ svgString: svg, width, height, scale, background })
+  const { blob, failed } = await renderPngBlob({ svgString, width, height, scale, background })
   downloadBlob(blob, filename)
   return { failed }
 }
