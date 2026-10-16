@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:lan": "vite --host",
     "build": "run-p type-check \"build-only {@}\" --",
     "preview": "npm run build && wrangler dev",
     "build-only": "vite build",
@@ -23,6 +24,7 @@
     "imagetracerjs": "^1.2.6",
     "paper": "^0.12.18",
     "pinia": "3.0.4",
+    "qrcode": "^1.5.4",
     "svgpath": "^2.6.0",
     "vue": "^3.5.40",
     "vue-router": "^5.2.0"
@@ -31,6 +33,7 @@
     "@cloudflare/vite-plugin": "^1.54.3",
     "@tsconfig/node24": "^24.0.4",
     "@types/node": "^24.13.3",
+    "@types/qrcode": "^1.5.5",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "2.4.6",
     "@vue/tsconfig": "^0.9.1",

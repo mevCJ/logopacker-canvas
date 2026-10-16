@@ -64,6 +64,7 @@ import { applyPathfinder, type PathfinderOp } from '@/services/canvas/pathBoolea
 import { vectorizeImageObject } from '@/services/canvas/vectorize'
 import IconAgent from '../icons/IconAgent.vue'
 import ControlBar from './ControlBar.vue'
+import { openSketchDialog } from '@/services/capture/captureState'
 
 const emit = defineEmits<{
   (e: 'fit-view'): void
@@ -165,6 +166,8 @@ const menus = computed<Menu[]>(() => [
       { label: 'Open…', keys: { mod: true, key: 'KeyO' }, action: () => emit('load') },
       { label: 'Save', keys: { mod: true, key: 'KeyS' }, action: () => emit('save') },
       SEP,
+      { label: 'Capture Sketch from Phone…', action: () => openSketchDialog() },
+      SEP,
       { label: 'Export…', keys: { mod: true, shift: true, key: 'KeyE' }, action: () => emit('export') },
     ],
   },
@@ -226,6 +229,11 @@ const menus = computed<Menu[]>(() => [
       { label: 'Exclude', action: () => pathfinder('exclude'), disabled: () => selPaths().length < 2 },
       SEP,
       { label: 'Image Trace', action: imageTrace, disabled: () => store.singleSelected?.type !== 'image' },
+      {
+        label: 'Clean Up Sketch…',
+        action: () => openSketchDialog(store.singleSelected!.id),
+        disabled: () => store.singleSelected?.type !== 'image',
+      },
       SEP,
       { header: 'Artboards' },
       {

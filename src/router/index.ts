@@ -12,6 +12,12 @@ const router = createRouter({
       alias: '/canvas',
     },
     {
+      // Phone side of sketch capture (opened from the desktop's QR code).
+      path: '/capture/:room',
+      name: 'capture',
+      component: () => import('../views/CaptureView.vue'),
+    },
+    {
       path: '/about',
       name: 'about',
       // route level code-splitting

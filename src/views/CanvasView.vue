@@ -19,6 +19,11 @@
       <CanvasStage ref="stage" class="canvas-stage-host" />
       <ToolSidebar @open-image-picker="onOpenImagePicker" />
       <ImageToolPopover v-if="imagePicker.open" :anchor="imagePicker.anchor" @close="imagePicker.open = false" />
+      <SketchDialog
+        v-if="sketchDialog.open"
+        :source-image-id="sketchDialog.sourceImageId"
+        @close="closeSketchDialog"
+      />
       <div v-if="showExport" class="export-overlay" @mousedown="showExport = false">
         <ExportDialog @close="showExport = false" />
       </div>
@@ -49,6 +54,8 @@ import ImageToolPopover from '@/components/canvas/ImageToolPopover.vue'
 import ExportDialog from '@/components/canvas/ExportDialog.vue'
 import PropertyPanel from '@/components/canvas/PropertyPanel.vue'
 import LayersPanel from '@/components/canvas/LayersPanel.vue'
+import SketchDialog from '@/components/canvas/SketchDialog.vue'
+import { sketchDialog, closeSketchDialog } from '@/services/capture/captureState'
 import AgentActivityLog from '@/components/canvas/AgentActivityLog.vue'
 
 const store = useCanvasStore()

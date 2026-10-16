@@ -15,7 +15,12 @@
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true
+	"upload_source_maps": true,
+	// Phone → desktop capture: a Durable Object relays the WebRTC handshake.
+	"durable_objects": {
+		"bindings": [{ "name": "CAPTURE_ROOM", "class_name": "CaptureRoom" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["CaptureRoom"] }]
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

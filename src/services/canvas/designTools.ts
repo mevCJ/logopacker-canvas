@@ -15,6 +15,10 @@ import {
 } from './pathBoolean'
 import { vectorizeImageObject, VECTORIZE_DEFAULTS } from './vectorize'
 import { normalizeGradient, withAngle } from './gradient'
+import { CleanupSession, decodePhoto } from '@/services/capture/cleanupClient'
+import { CLEANUP_DEFAULTS, type ColorFilter } from '@/services/capture/sketchCleanup'
+import { placeSketch } from '@/services/capture/placeSketch'
+import { openSketchDialog } from '@/services/capture/captureState'
 
 export function buildDesignTools(
   store: CanvasStore,
@@ -268,6 +272,82 @@ export function buildDesignTools(
         } catch (err) {
           store.undo()
           return fail('Vectorize', err)
+        }
+      },
+    },
+    {
+      name: 'capture_sketch_from_phone',
+      description:
+        'Opens the phone capture dialog (QR code) so the designer can photograph a paper sketch with their phone. The designer finishes cleanup and placement in the dialog; nothing is returned to the agent.',
+      inputSchema: { type: 'object', properties: {} },
+      execute() {
+        openSketchDialog()
+        log('Opened phone sketch capture')
+        return text({ opened: true, note: 'The designer completes capture and cleanup in the dialog.' })
+      },
+    },
+    {
+      name: 'clean_up_sketch',
+      description:
+        'Cleans a photographed sketch already on the canvas (an image object): straightens the paper (auto-detected), removes shadows/glare, smooths paper texture, optionally drops colored lines and screen moiré, then binarizes to black on white. Places the result over the original (which is hidden), traced to vector paths when vectorize=true.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Image object id.' },
+          vectorize: { type: 'boolean', description: 'Trace into black vector paths (default true).' },
+          straighten: { type: 'boolean', description: 'Auto-detect and straighten the paper (default true).' },
+          colorFilter: { type: 'string', enum: ['none', 'darkInk', 'removeBlue', 'removeRed'] },
+          moire: { type: 'boolean' },
+          removeShadows: { type: 'boolean' },
+          smoothing: { type: 'number', description: '0-1' },
+          sensitivity: { type: 'number', description: '0-1, higher keeps fainter strokes' },
+          despeckle: { type: 'number', description: '0-1' },
+          strokeAdjust: { type: 'number', description: '-2..2 thin/thicken strokes' },
+        },
+        required: ['id'],
+      },
+      async execute(input: {
+        id: string
+        vectorize?: boolean
+        straighten?: boolean
+        colorFilter?: ColorFilter
+        moire?: boolean
+        removeShadows?: boolean
+        smoothing?: number
+        sensitivity?: number
+        despeckle?: number
+        strokeAdjust?: number
+      }) {
+        const img = store.getObject(input.id)
+        if (!img || img.type !== 'image') return text({ error: `No image object ${input.id}` })
+        const session = new CleanupSession()
+        try {
+          const photo = await decodePhoto(await (await fetch(img.href)).blob())
+          const corners = await session.load(photo)
+          const { id: _id, vectorize = true, straighten = true, ...rest } = input
+          const r = await session.process({
+            ...CLEANUP_DEFAULTS,
+            ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)),
+            corners: straighten ? corners : null,
+          })
+          if (!r) return text({ error: 'Cleanup was interrupted.' })
+          const cv = document.createElement('canvas')
+          cv.width = r.image.width
+          cv.height = r.image.height
+          cv.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(r.image.data), r.image.width, r.image.height), 0, 0)
+          const ids = await placeSketch(store, {
+            dataUrl: cv.toDataURL('image/png'),
+            width: r.image.width,
+            height: r.image.height,
+            vectorize,
+            replaceImageId: img.id,
+          })
+          log(`Cleaned up sketch → ${ids.length} object(s)`)
+          return text({ created: ids, hiddenImage: img.id, straightened: !!(straighten && corners) })
+        } catch (err) {
+          return fail('Clean up sketch', err)
+        } finally {
+          session.dispose()
         }
       },
     },

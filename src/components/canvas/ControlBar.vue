@@ -80,6 +80,7 @@
       <template v-if="single && single.type === 'image'">
         <span class="cb-sep" />
         <button type="button" class="cb-btn" :disabled="busy" @click="imageTrace">{{ busy ? 'Tracing…' : 'Image Trace' }}</button>
+        <button type="button" class="cb-btn" title="Straighten, remove shadows and binarize a photographed sketch" @click="openSketchDialog(single.id)">Clean Up Sketch…</button>
       </template>
 
       <span class="cb-sep" />
@@ -141,6 +142,7 @@
       <span class="cb-sep" />
       <button type="button" class="cb-btn" @click="addArtboard">New Artboard</button>
       <button type="button" class="cb-btn" @click="emit('fit-view')">Fit All</button>
+      <button type="button" class="cb-btn" @click="openSketchDialog()">Capture Sketch…</button>
       <span class="cb-hint">Tip: press and hold a tool to see its group · ⌘Y toggles Outline</span>
     </template>
   </div>
@@ -162,6 +164,7 @@ import { gradientCss } from '@/services/canvas/gradient'
 import { isNonePaint } from '@/services/canvas/color'
 import { documentColors } from '@/services/canvas/documentColors'
 import { vectorizeImageObject } from '@/services/canvas/vectorize'
+import { openSketchDialog } from '@/services/capture/captureState'
 
 const emit = defineEmits<{ (e: 'fit-view'): void }>()
 const store = useCanvasStore()
