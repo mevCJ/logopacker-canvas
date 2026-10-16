@@ -12,6 +12,7 @@ import '@svgdotjs/svg.draggable.js'
 import { splitPaint } from './color'
 import { gradientId, gradientMarkup, type GradientFill } from './gradient'
 import { layoutAreaText } from './textLayout'
+import type { Guide } from './snapEngine'
 
 export interface Box {
   x: number
@@ -916,6 +917,7 @@ export class CanvasRenderer {
   artboardOverlayLayer: SvgEl
   ghostLayer: SvgEl
   toolLayer: SvgEl
+  guideLayer: SvgEl
   private _artboardEls = new Map<string, SvgEl>()
   private _objectEls = new Map<string, SvgEl>()
   // <defs> guide paths for text-on-path objects, keyed by text object id.
@@ -937,6 +939,12 @@ export class CanvasRenderer {
   // propagation on press, so when another tool is active (pen, shape builder,
   // space-pan…) the drag must be vetoed for the stage to receive the press.
   canDragObjects: () => boolean = () => true
+  // Snapping hooks (smart guides / snap to point), supplied by the host. Each
+  // returns the adjusted value; the host also draws guides via showGuides.
+  snapMove: ((ids: string[], dx: number, dy: number, ev?: MouseEvent) => { dx: number; dy: number }) | null = null
+  snapResize: ((id: string, handle: ResizeHandle, box: Box, ev: MouseEvent) => Box) | null = null
+  snapNodePoint: ((id: string, p: { x: number; y: number }, ev: MouseEvent) => { x: number; y: number }) | null = null
+  onSnapEnd: (() => void) | null = null
 
   // The currently selected objects (geometry needed to draw handles). Kept in
   // sync by setSelection so handle overlays can be redrawn after any render.
@@ -972,6 +980,8 @@ export class CanvasRenderer {
     // preview). Kept on their own top layer so store re-renders and selection
     // redraws never clear them.
     this.toolLayer = this.draw.group().addClass('tool-layer')
+    // Smart guides draw above everything and never take pointer events.
+    this.guideLayer = this.draw.group().addClass('guide-layer').attr({ 'pointer-events': 'none' })
   }
 
   // Outline view: a class on the root <svg>; CanvasStage styles it into a
@@ -1212,6 +1222,62 @@ export class CanvasRenderer {
     this._gradientEl = g
   }
 
+  // Smart guides: magenta alignment lines, equal-spacing markers with their
+  // distance, a label on the snapped point, and an optional measurement
+  // readout (e.g. "X 120  Y 48") near the pointer. All sizes are in screen
+  // pixels converted to canvas units so they stay crisp at any zoom.
+  showGuides(guides: Guide[], readout?: { x: number; y: number; text: string }): void {
+    this.guideLayer.clear()
+    if (!guides.length && !readout) return
+    // Canvas units per screen pixel (the SVG letterboxes, so use the larger).
+    const sc = this._canvasScale()
+    const px = Math.max(sc.sx, sc.sy) || 1
+    const color = '#d6249f'
+    const w = px
+    const label = (x: number, y: number, text: string, bg: string) => {
+      const fs = 10 * px
+      const tw = text.length * fs * 0.62 + fs
+      this.guideLayer
+        .rect(tw, fs * 1.7)
+        .radius(fs * 0.4)
+        .move(x, y)
+        .fill(bg)
+      this.guideLayer
+        .plain(text)
+        .font({ family: 'Inter, sans-serif', size: fs, weight: 600 })
+        .fill('#ffffff')
+        .attr({ x: x + tw / 2, y: y + fs * 1.2, 'text-anchor': 'middle' })
+    }
+    for (const g of guides) {
+      if (g.kind === 'align') {
+        this.guideLayer.line(g.x1, g.y1, g.x2, g.y2).stroke({ color, width: w })
+      } else if (g.kind === 'gap') {
+        const vertical = g.x1 === g.x2
+        const t = 4 * px
+        this.guideLayer.line(g.x1, g.y1, g.x2, g.y2).stroke({ color, width: w })
+        if (vertical) {
+          this.guideLayer.line(g.x1 - t, g.y1, g.x1 + t, g.y1).stroke({ color, width: w })
+          this.guideLayer.line(g.x2 - t, g.y2, g.x2 + t, g.y2).stroke({ color, width: w })
+        } else {
+          this.guideLayer.line(g.x1, g.y1 - t, g.x1, g.y1 + t).stroke({ color, width: w })
+          this.guideLayer.line(g.x2, g.y2 - t, g.x2, g.y2 + t).stroke({ color, width: w })
+        }
+        const mx = (g.x1 + g.x2) / 2
+        const my = (g.y1 + g.y2) / 2
+        label(mx + (vertical ? 4 * px : -8 * px), my + (vertical ? -8 * px : 4 * px), g.label, color)
+      } else {
+        const c = 4 * px
+        this.guideLayer.path(`M${g.x - c} ${g.y - c}L${g.x + c} ${g.y + c}M${g.x + c} ${g.y - c}L${g.x - c} ${g.y + c}`).stroke({ color, width: w * 1.5 })
+        label(g.x + 6 * px, g.y + 6 * px, g.label, color)
+      }
+    }
+    if (readout) label(readout.x + 12 * px, readout.y + 12 * px, readout.text, '#3f3f46')
+  }
+
+  hideGuides(): void {
+    this.guideLayer.clear()
+  }
+
   hideGradientAnnotator(): void {
     if (this._gradientEl) {
       try {
@@ -1221,6 +1287,19 @@ export class CanvasRenderer {
       }
       this._gradientEl = null
     }
+  }
+
+  // Canvas units per screen pixel at the current zoom.
+  canvasUnitsPerPixel(): number {
+    const sc = this._canvasScale()
+    return Math.max(sc.sx, sc.sy) || 1
+  }
+
+  // Map points in an object's local/base frame (e.g. path anchors) to canvas
+  // space, with the exact transform the renderer applies.
+  objectLocalToCanvas(obj: RenderObject, pts: { x: number; y: number }[]): { x: number; y: number }[] {
+    const t = this._objectTransformParams(obj)
+    return pts.map((p) => nodePointToCanvas(p, t))
   }
 
   private _objectTransformParams(obj: RenderObject): ObjectTransformParams {
@@ -1308,11 +1387,21 @@ export class CanvasRenderer {
         if (!obj || obj.type !== 'path' || !objEl) return
         const base = (obj.nodes || []).map((n) => ({ ...n }))
         const t = this._objectTransformParams(obj)
-        const startLocal = canvasPointToNode(this.screenToCanvas(e.clientX, e.clientY), t)
+        const startCanvas = this.screenToCanvas(e.clientX, e.clientY)
+        const startLocal = canvasPointToNode(startCanvas, t)
+        const anchorCanvas = base[index] ? nodePointToCanvas(base[index]!, t) : null
         const onMove = (ev: MouseEvent) => {
-          const curLocal = canvasPointToNode(this.screenToCanvas(ev.clientX, ev.clientY), t)
-          const dx = curLocal.x - startLocal.x
-          const dy = curLocal.y - startLocal.y
+          const cur = this.screenToCanvas(ev.clientX, ev.clientY)
+          let curLocal = canvasPointToNode(cur, t)
+          let dx = curLocal.x - startLocal.x
+          let dy = curLocal.y - startLocal.y
+          // Anchors snap where they would land (handles move freely).
+          if (kind === 'anchor' && anchorCanvas && this.snapNodePoint) {
+            const target = { x: anchorCanvas.x + cur.x - startCanvas.x, y: anchorCanvas.y + cur.y - startCanvas.y }
+            curLocal = canvasPointToNode(this.snapNodePoint(id, target, ev), t)
+            dx = curLocal.x - base[index]!.x
+            dy = curLocal.y - base[index]!.y
+          }
           this._liveNodes = applyNodeDrag(base, index, kind, dx, dy)
           this._applyLivePath(objEl, obj)
           this._redrawSelection()
@@ -1320,6 +1409,7 @@ export class CanvasRenderer {
         const onUp = () => {
           window.removeEventListener('mousemove', onMove)
           window.removeEventListener('mouseup', onUp)
+          this.onSnapEnd?.()
           const next = this._liveNodes
           this._liveNodes = null
           if (next && typeof this.onPathNodesChanged === 'function') {
@@ -1454,12 +1544,16 @@ export class CanvasRenderer {
           const { sx, sy } = this._canvasScale()
           const dx = (ev.clientX - origin.x) * sx
           const dy = (ev.clientY - origin.y) * sy
-          this._liveBox = resizeBoxFromHandle(startBox, handle, dx, dy, rot, ev.shiftKey)
+          let next = resizeBoxFromHandle(startBox, handle, dx, dy, rot, ev.shiftKey)
+          // Edge snapping for unrotated, free (non-proportional) resizes.
+          if (this.snapResize && !rot && !ev.shiftKey) next = this.snapResize(id, handle, next, ev)
+          this._liveBox = next
           this._redrawSelection()
         }
         const onUp = () => {
           window.removeEventListener('mousemove', onMove)
           window.removeEventListener('mouseup', onUp)
+          this.onSnapEnd?.()
           const box = this._liveBox
           this._liveBox = null
           if (box && typeof this.onObjectResized === 'function') {
@@ -1911,12 +2005,17 @@ export class CanvasRenderer {
     el.on('beforedrag', (e: CustomEvent) => {
       if (!this.canDragObjects()) e.preventDefault()
     })
+    // Ids being moved and the last (possibly snapped) delta shown.
+    let dragIds: string[] = []
+    let lastDelta: { dx: number; dy: number } | null = null
     el.on('dragstart', (e: CustomEvent) => {
       startBox = (e.detail as { box: { x: number; y: number } }).box
       clearGhost()
+      lastDelta = null
+      const selectedIds0 = this._selectedObjects.map((o) => o.id)
+      dragIds = selectedIds0.includes(obj.id) ? selectedIds0 : [obj.id]
       try {
-        const selectedIds = this._selectedObjects.map((o) => o.id)
-        const ghostIds = selectedIds.includes(obj.id) ? selectedIds : [obj.id]
+        const ghostIds = dragIds
         const group = this.ghostLayer.group().attr({ 'pointer-events': 'none' }).opacity(0.5)
         for (const gid of ghostIds) {
           const src = gid === obj.id ? el : this._objectEls.get(gid)
@@ -1937,10 +2036,13 @@ export class CanvasRenderer {
       // Stop the plugin from moving the real element; move the ghost instead so
       // the original stays fixed while the preview tracks the cursor.
       e.preventDefault()
-      const box = (e.detail as { box: { x: number; y: number } }).box
+      const detail = e.detail as { box: { x: number; y: number }; event?: MouseEvent }
+      const box = detail.box
       if (ghost && startBox) {
-        const dx = box.x - startBox.x
-        const dy = box.y - startBox.y
+        let dx = box.x - startBox.x
+        let dy = box.y - startBox.y
+        if (this.snapMove) ({ dx, dy } = this.snapMove(dragIds, dx, dy, detail.event))
+        lastDelta = { dx, dy }
         try {
           ghost.attr('transform', `translate(${dx} ${dy})`)
         } catch {
@@ -1952,10 +2054,13 @@ export class CanvasRenderer {
       clearGhost()
       const detail = e.detail as { box: { x: number; y: number }; event?: MouseEvent }
       const endBox = detail.box
+      this.onSnapEnd?.()
       if (!startBox) return
-      const dx = endBox.x - startBox.x
-      const dy = endBox.y - startBox.y
+      // Commit what the ghost showed (the snapped delta), not the raw pointer.
+      const dx = lastDelta ? lastDelta.dx : endBox.x - startBox.x
+      const dy = lastDelta ? lastDelta.dy : endBox.y - startBox.y
       startBox = null
+      lastDelta = null
       if ((dx === 0 && dy === 0) || typeof this.onObjectDragEnd !== 'function') {
         return
       }

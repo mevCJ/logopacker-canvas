@@ -73,6 +73,9 @@ import {
 import type { PathObject } from '@/stores/canvas'
 import { defaultGradient } from '@/services/canvas/gradient'
 import { cssFontFamily, DEFAULT_LINE_HEIGHT } from '@/services/canvas/textLayout'
+import { buildScene, snapEdges, snapMove, snapPoint, type SnapOptions, type SnapScene } from '@/services/canvas/snapEngine'
+import { snapSettings, SNAP_PX } from '@/services/canvas/snapSettings'
+import { flattenSubpaths, parsePathData } from '@/services/canvas/svgToPaths'
 import { isNonePaint } from '@/services/canvas/color'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -493,7 +496,7 @@ function onMouseDown(e: MouseEvent) {
   // Pen has its own press-drag-release cycle: press places an anchor, dragging
   // pulls its Bézier handles, release commits it. Space still forces panning.
   if (tool === 'pen' && !spacePressed.value) {
-    penMouseDown(e.clientX, e.clientY)
+    penMouseDown(e.clientX, e.clientY, e)
     window.addEventListener('mousemove', onPenDragMove)
     window.addEventListener('mouseup', onPenDragUp)
     return
@@ -510,7 +513,9 @@ function onMouseDown(e: MouseEvent) {
     tool === 'gradient'
 
   if (!wantPan && (tool === 'select' || tool === 'text' || isShapeTool(tool))) {
-    const p = renderer.screenToCanvas(e.clientX, e.clientY)
+    const raw = renderer.screenToCanvas(e.clientX, e.clientY)
+    // Shapes and text boxes start on a snapped point; the marquee doesn't snap.
+    const p = tool === 'select' ? raw : snapCanvasPoint(raw, e)
     toolDrag = {
       kind: tool === 'select' ? 'marquee' : tool === 'text' ? 'textbox' : 'shape',
       start: p,
@@ -538,7 +543,15 @@ function onMouseMove(e: MouseEvent) {
   if (!renderer) return
 
   if (toolDrag) {
-    toolDrag.current = renderer.screenToCanvas(e.clientX, e.clientY)
+    const raw = renderer.screenToCanvas(e.clientX, e.clientY)
+    toolDrag.current = toolDrag.kind === 'marquee' ? raw : snapCanvasPoint(raw, e)
+    if (toolDrag.kind !== 'marquee' && snapSettings.smartGuides) {
+      const b = normalizeDragBox(toolDrag.start, toolDrag.current)
+      // Keep the snap guides and add a size readout.
+      const scene = ensureScene([])
+      const guides = snapPoint(scene, toolDrag.current, snapTol(), snapOptions(e)).guides
+      renderer.showGuides(guides, { ...raw, text: `W ${Math.round(b.width)}  H ${Math.round(b.height)}` })
+    }
     const box = normalizeDragBox(toolDrag.start, toolDrag.current)
     if (box.width > 1 || box.height > 1) toolDrag.moved = true
     if (toolDrag.kind === 'marquee') {
@@ -583,6 +596,7 @@ function onMouseUp(e: MouseEvent) {
   if (toolDrag && renderer) {
     const drag = toolDrag
     toolDrag = null
+    endSnap()
     if (drag.kind === 'marquee') {
       renderer.hideMarquee()
       if (drag.moved) {
@@ -627,6 +641,144 @@ function handleEmptyClick(e: MouseEvent) {
   store.clearSelection()
 }
 
+// --- Smart guides & snapping --------------------------------------------------
+// One scene (everything snappable except what's moving) is built when an
+// interaction first asks to snap and dropped when it ends. Holding Cmd/Ctrl
+// bypasses snapping for that drag.
+let snapScene: SnapScene | null = null
+let snapExclude = ''
+// Anchors cached per object path data, in local coordinates.
+const anchorCache = new Map<string, { d: string; pts: { x: number; y: number }[] }>()
+const MAX_ANCHORS = 20000
+
+function snapTol(): number {
+  return SNAP_PX * (renderer?.canvasUnitsPerPixel() ?? 1)
+}
+
+function snapOptions(ev?: MouseEvent): SnapOptions {
+  const bypass = !!ev && (ev.metaKey || ev.ctrlKey)
+  return { points: snapSettings.snapToPoint && !bypass, guides: snapSettings.smartGuides && !bypass }
+}
+
+function localAnchors(o: { id: string; d: string; nodes?: PathNode[] }): { x: number; y: number }[] {
+  if (o.nodes?.length) return o.nodes
+  const cached = anchorCache.get(o.id)
+  if (cached && cached.d === o.d) return cached.pts
+  let pts: { x: number; y: number }[] = []
+  try {
+    pts = flattenSubpaths(parsePathData(o.d)).nodes
+  } catch {
+    /* unparseable path: no anchors */
+  }
+  anchorCache.set(o.id, { d: o.d, pts })
+  return pts
+}
+
+function canvasAnchors(id: string): { x: number; y: number }[] {
+  const o = store.getObject(id)
+  if (!o || o.type !== 'path' || !renderer) return []
+  return renderer.objectLocalToCanvas(o as any, localAnchors(o))
+}
+
+function ensureScene(exclude: string[]): SnapScene {
+  const k = exclude.slice().sort().join(',')
+  if (snapScene && snapExclude === k) return snapScene
+  const skip = new Set(exclude)
+  const boxes: Box[] = []
+  const anchors: { x: number; y: number }[] = []
+  for (const o of store.orderedObjects) {
+    if (skip.has(o.id) || o.hidden) continue
+    const b = store.objectCanvasBounds(o.id)
+    if (b) boxes.push(b)
+    if (anchors.length < MAX_ANCHORS) anchors.push(...canvasAnchors(o.id))
+  }
+  const artboardBoxes = store.artboards.map((a) => ({ x: a.x, y: a.y, width: a.width, height: a.height }))
+  snapScene = buildScene({ boxes, anchors, artboards: artboardBoxes }, snapTol())
+  snapExclude = k
+  return snapScene
+}
+
+function endSnap() {
+  snapScene = null
+  snapExclude = ''
+  renderer?.hideGuides()
+}
+
+function unionBounds(ids: string[]): Box | null {
+  const bs = ids.map((id) => store.objectCanvasBounds(id)).filter((b): b is Box => !!b)
+  if (!bs.length) return null
+  const x = Math.min(...bs.map((b) => b.x))
+  const y = Math.min(...bs.map((b) => b.y))
+  return {
+    x,
+    y,
+    width: Math.max(...bs.map((b) => b.x + b.width)) - x,
+    height: Math.max(...bs.map((b) => b.y + b.height)) - y,
+  }
+}
+
+// Readout position relative to the artboard under a canvas point.
+function artboardLocal(p: { x: number; y: number }): { x: number; y: number } {
+  const ab = resolveArtboardAtPoint(store.artboards, p)
+  return { x: p.x - (ab?.x ?? 0), y: p.y - (ab?.y ?? 0) }
+}
+
+function wireSnapping(r: CanvasRenderer) {
+  r.snapMove = (ids, dx, dy, ev) => {
+    const opts = snapOptions(ev)
+    const box = unionBounds(ids)
+    if (!box) return { dx, dy }
+    let res = { dx, dy, guides: [] as ReturnType<typeof snapMove>['guides'] }
+    if (opts.points || opts.guides) {
+      const scene = ensureScene(ids)
+      const moving = ids.length <= 3 ? ids.flatMap(canvasAnchors).slice(0, 400) : []
+      res = snapMove(scene, box, moving, dx, dy, snapTol(), opts)
+    }
+    if (snapSettings.smartGuides) {
+      const at = artboardLocal({ x: box.x + res.dx, y: box.y + res.dy })
+      const cursor = ev ? r.screenToCanvas(ev.clientX, ev.clientY) : { x: box.x + res.dx, y: box.y + res.dy }
+      r.showGuides(res.guides, { ...cursor, text: `X ${Math.round(at.x)}  Y ${Math.round(at.y)}` })
+    }
+    return res
+  }
+  r.snapResize = (id, handle, box, ev) => {
+    const opts = snapOptions(ev)
+    let out = box
+    let guides: ReturnType<typeof snapEdges>['guides'] = []
+    if (opts.points || opts.guides) {
+      const edges = {
+        left: handle.includes('w'),
+        right: handle.includes('e'),
+        top: handle.includes('n'),
+        bottom: handle.includes('s'),
+      }
+      ;({ box: out, guides } = snapEdges(ensureScene([id]), box, edges, snapTol(), opts))
+    }
+    if (snapSettings.smartGuides) {
+      const cursor = r.screenToCanvas(ev.clientX, ev.clientY)
+      r.showGuides(guides, { ...cursor, text: `W ${Math.round(out.width)}  H ${Math.round(out.height)}` })
+    }
+    return out
+  }
+  r.snapNodePoint = (id, p, ev) => {
+    const q = snapCanvasPoint(p, ev, [id])
+    return { x: q.x, y: q.y }
+  }
+  r.onSnapEnd = endSnap
+}
+
+// Snap a free point (pen anchors, shape corners, node drags) and show guides.
+function snapCanvasPoint(p: { x: number; y: number }, ev?: MouseEvent, exclude: string[] = []): { x: number; y: number } {
+  const opts = snapOptions(ev)
+  if (!renderer || (!opts.points && !opts.guides)) {
+    renderer?.hideGuides()
+    return p
+  }
+  const r = snapPoint(ensureScene(exclude), p, snapTol(), opts)
+  renderer.showGuides(r.guides)
+  return { x: r.x, y: r.y }
+}
+
 // --- Pen tool: Bézier path builder ---------------------------------------
 // Click for a corner anchor; press-drag to pull symmetric tangent handles for
 // a smooth anchor. Close by clicking near the first anchor; finish an open path
@@ -649,9 +801,10 @@ function penNearStart(p: { x: number; y: number }): boolean {
   return Math.hypot(p.x - first.x, p.y - first.y) <= penDistanceThreshold()
 }
 
-function penMouseDown(clientX: number, clientY: number) {
+function penMouseDown(clientX: number, clientY: number, ev?: MouseEvent) {
   if (!renderer) return
-  const p = renderer.screenToCanvas(clientX, clientY)
+  const p = snapCanvasPoint(renderer.screenToCanvas(clientX, clientY), ev)
+  renderer.hideGuides()
   // Clicking near the first anchor of a 2+ node path closes it.
   if (penNearStart(p) && penNodes && penNodes.length >= 2) {
     finishPen(true)
@@ -715,6 +868,7 @@ function finishPen(closed: boolean) {
   const nodes = penNodes
   penNodes = null
   penDraft = null
+  endSnap()
   if (renderer) renderer.hidePenPreview()
   if (!nodes || nodes.length < 2) return
   // A double-click's first click commits an anchor immediately before finishing,
@@ -746,7 +900,7 @@ function onStageMouseMove(e: MouseEvent) {
   // While drawing but between anchors (no button down), show a rubber-band from
   // the last anchor to the cursor.
   if (store.activeTool === 'pen' && penNodes && !penDraft && renderer) {
-    const cursor = renderer.screenToCanvas(e.clientX, e.clientY)
+    const cursor = snapCanvasPoint(renderer.screenToCanvas(e.clientX, e.clientY), e)
     renderer.showPenPreview([...penNodes, { x: cursor.x, y: cursor.y }], penNearStart(cursor))
   }
 }
@@ -1325,6 +1479,7 @@ onMounted(() => {
   renderer.onArtboardResized = onArtboardResized
   renderer.onPathNodesChanged = onPathNodesChanged
   renderer.canDragObjects = () => store.activeTool === 'select' && !spacePressed.value
+  wireSnapping(renderer)
   // Let the store measure true rendered geometry (e.g. for fit-to-artwork).
   setObjectBoxMeasurer((obj) => (renderer ? renderer.measureObjectBox(obj as any) : null))
   // Let WebMCP tools (which only have the store) drive the viewport.
@@ -1383,6 +1538,9 @@ watch(
 
 watch(viewMode, (mode) => renderer?.setViewMode(mode))
 
+// Any document change invalidates the cached snap scene.
+watch([objects, objectOrder, artboards], () => (snapScene = null), { deep: true })
+
 // Shape builder regions follow the selection and any document change (undo,
 // agent edits) while the tool is armed.
 watch(
@@ -1422,6 +1580,7 @@ watch(activeTool, () => {
   toolDrag = null
   penNodes = null
   penDraft = null
+  endSnap()
   if (renderer) renderer.setNodeEditMode(store.activeTool === 'node')
   toolHint.value =
     store.activeTool === 'textPath'

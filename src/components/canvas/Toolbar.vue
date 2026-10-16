@@ -67,6 +67,7 @@ import ControlBar from './ControlBar.vue'
 import { openSketchDialog } from '@/services/capture/captureState'
 import { addFontFiles, fontLibrary, loadLocalFonts } from '@/services/canvas/fontLibrary'
 import { createOutlines } from '@/services/canvas/textOutlines'
+import { snapSettings } from '@/services/canvas/snapSettings'
 
 const emit = defineEmits<{
   (e: 'fit-view'): void
@@ -360,6 +361,19 @@ const menus = computed<Menu[]>(() => [
         checked: () => store.viewMode === 'outline',
       },
       SEP,
+      {
+        label: 'Smart Guides',
+        keys: { mod: true, key: 'KeyU' },
+        action: () => (snapSettings.smartGuides = !snapSettings.smartGuides),
+        checked: () => snapSettings.smartGuides,
+      },
+      {
+        label: 'Snap to Point',
+        keys: { mod: true, alt: true, key: 'Quote' },
+        action: () => (snapSettings.snapToPoint = !snapSettings.snapToPoint),
+        checked: () => snapSettings.snapToPoint,
+      },
+      SEP,
       { label: 'Fit All in Window', keys: { mod: true, key: 'Digit0' }, action: () => emit('fit-view') },
     ],
   },
@@ -402,6 +416,7 @@ function keyName(code: string): string {
   if (code === 'BracketRight') return ']'
   if (code === 'BracketLeft') return '['
   // Font size shortcuts read as Illustrator's ⇧⌘> / ⇧⌘<.
+  if (code === 'Quote') return '"'
   if (code === 'Period') return '>'
   if (code === 'Comma') return '<'
   return code
