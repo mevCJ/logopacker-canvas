@@ -65,6 +65,8 @@ import { vectorizeImageObject } from '@/services/canvas/vectorize'
 import IconAgent from '../icons/IconAgent.vue'
 import ControlBar from './ControlBar.vue'
 import { openSketchDialog } from '@/services/capture/captureState'
+import { addFontFiles, fontLibrary, loadLocalFonts } from '@/services/canvas/fontLibrary'
+import { createOutlines } from '@/services/canvas/textOutlines'
 
 const emit = defineEmits<{
   (e: 'fit-view'): void
@@ -89,6 +91,9 @@ interface Keys {
   shift?: boolean
   alt?: boolean
   key: string
+  // Typed characters that also trigger it (layout-independent, e.g. '>' sits
+  // on a different physical key on many non-US keyboards).
+  chars?: string[]
   // Shown in the menu but handled elsewhere (CanvasStage owns these).
   displayOnly?: boolean
 }
@@ -149,6 +154,54 @@ function arrange(dir: 'front' | 'forward' | 'backward' | 'back') {
   if (dir === 'back') [...ids].reverse().forEach((id) => store.sendToBack(id))
   if (dir === 'forward') [...ids].reverse().forEach((id) => store.shiftObject(id, 1))
   if (dir === 'backward') ids.forEach((id) => store.shiftObject(id, -1))
+}
+
+const selTexts = () => store.selectedObjects.filter((o) => o.type === 'text')
+
+function bumpFont(dir: 1 | -1) {
+  const ids = selTexts().map((o) => o.id)
+  if (!ids.length) return
+  store.snapshot(dir > 0 ? 'Increase font size' : 'Decrease font size')
+  store.bumpFontSize(ids, dir * 2)
+}
+
+async function outlines() {
+  const ids = selTexts().map((o) => o.id)
+  if (!ids.length) return
+  store.snapshot('Create outlines')
+  try {
+    store.selectObjects(await createOutlines(store, ids))
+  } catch (err) {
+    store.undo()
+    window.alert((err as Error).message)
+  }
+}
+
+async function useInstalledFonts() {
+  try {
+    const n = await loadLocalFonts()
+    window.alert(`${n} installed font families are now in the font menus.`)
+  } catch (err) {
+    window.alert((err as Error).message)
+  }
+}
+
+function addFontFile() {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.ttf,.otf,.woff,.woff2,font/*'
+  input.multiple = true
+  input.onchange = async () => {
+    const files = [...(input.files ?? [])]
+    if (!files.length) return
+    try {
+      const added = await addFontFiles(files)
+      window.alert(`Added ${added.map((f) => f.label).join(', ')} for this session.`)
+    } catch (err) {
+      window.alert(`Couldn\u2019t load that font: ${(err as Error).message}`)
+    }
+  }
+  input.click()
 }
 
 function duplicate() {
@@ -256,6 +309,26 @@ const menus = computed<Menu[]>(() => [
     ],
   },
   {
+    id: 'type',
+    label: 'Type',
+    items: [
+      { header: 'Fonts' },
+      {
+        label: fontLibrary.localStatus === 'granted' ? 'Installed Fonts Loaded' : 'Use Installed Fonts…',
+        action: useInstalledFonts,
+        disabled: () => fontLibrary.localStatus === 'granted' || fontLibrary.localStatus === 'unsupported',
+      },
+      { label: 'Add Font File…', action: addFontFile },
+      SEP,
+      { label: 'Increase Font Size', keys: { mod: true, shift: true, key: 'Period', chars: ['>'] }, action: () => bumpFont(1), disabled: () => !selTexts().length },
+      { label: 'Decrease Font Size', keys: { mod: true, shift: true, key: 'Comma', chars: ['<'] }, action: () => bumpFont(-1), disabled: () => !selTexts().length },
+      SEP,
+      { label: 'Create Outlines', keys: { mod: true, shift: true, key: 'KeyO' }, action: outlines, disabled: () => !selTexts().length },
+      SEP,
+      { label: 'Type on a Path Tool', action: () => store.setActiveTool('textPath') },
+    ],
+  },
+  {
     id: 'select',
     label: 'Select',
     items: [
@@ -328,6 +401,9 @@ function keyName(code: string): string {
   if (code.startsWith('Digit')) return code.slice(5)
   if (code === 'BracketRight') return ']'
   if (code === 'BracketLeft') return '['
+  // Font size shortcuts read as Illustrator's ⇧⌘> / ⇧⌘<.
+  if (code === 'Period') return '>'
+  if (code === 'Comma') return '<'
   return code
 }
 function fmtKeys(k: Keys): string {
@@ -348,7 +424,8 @@ function onKeyDown(e: KeyboardEvent) {
     for (const entry of menu.items) {
       if (entry === SEP || 'header' in entry || !entry.keys || entry.keys.displayOnly) continue
       const k = entry.keys
-      if (!!k.mod !== mod || !!k.shift !== e.shiftKey || !!k.alt !== e.altKey || k.key !== e.code) continue
+      if (!!k.mod !== mod || !!k.shift !== e.shiftKey || !!k.alt !== e.altKey) continue
+      if (k.key !== e.code && !k.chars?.includes(e.key)) continue
       e.preventDefault()
       if (!entry.disabled?.()) entry.action()
       return

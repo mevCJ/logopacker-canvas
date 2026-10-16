@@ -14,8 +14,10 @@
       class="inline-text-editor"
       :style="inlineStyle"
       v-model="inlineEdit.value"
+      spellcheck="false"
       @mousedown.stop
       @wheel.stop
+      @input="fitInlineSize"
       @blur="commitInlineEdit"
       @keydown="onInlineKeydown"
     ></textarea>
@@ -70,6 +72,8 @@ import {
 } from '@/services/canvas/pathBoolean'
 import type { PathObject } from '@/stores/canvas'
 import { defaultGradient } from '@/services/canvas/gradient'
+import { cssFontFamily, DEFAULT_LINE_HEIGHT } from '@/services/canvas/textLayout'
+import { isNonePaint } from '@/services/canvas/color'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -102,7 +106,7 @@ let lastPointer: { clientX: number; clientY: number } | null = null
 
 // Drag interaction state for the marquee (select) and shape tools. Points are
 // in canvas coordinates.
-type DragKind = 'marquee' | 'shape'
+type DragKind = 'marquee' | 'shape' | 'textbox'
 let toolDrag: {
   kind: DragKind
   start: { x: number; y: number }
@@ -129,10 +133,14 @@ let penDraft: { anchor: { x: number; y: number }; drag: { x: number; y: number }
 // Close threshold in screen pixels (converted to canvas units at use time).
 const PEN_CLOSE_PX = 12
 
-// Inline text editing overlay state.
+// Inline text editing overlay state. While editing, the SVG text is hidden
+// and a transparent textarea drawn in the same font, size, leading, alignment
+// and rotation sits exactly over it, so typing happens "on the canvas".
 const inlineInput = ref<HTMLTextAreaElement | null>(null)
-const inlineEdit = ref<{ id: string; value: string } | null>(null)
+const inlineEdit = ref<{ id: string; value: string; isNew: boolean } | null>(null)
 const inlineStyle = ref<Record<string, string>>({})
+// Point type renders multi-line text with svg.js's default leading.
+const POINT_LEADING = 1.3
 
 function computeInlineStyle(id: string) {
   const obj = store.getObject(id)
@@ -141,65 +149,115 @@ function computeInlineStyle(id: string) {
   const canvasPoint = { x: (artboard?.x ?? 0) + obj.x, y: (artboard?.y ?? 0) + obj.y }
   const rect = mount.value.getBoundingClientRect()
   const { left, top, scale } = canvasPointToScreenRect(canvasPoint, renderer.getViewBox(), rect)
-  const fontSize = (obj.fontSize || 24) * scale
-  inlineStyle.value = {
+  const fs = (obj.fontSize || 24) * scale
+  const area = !!obj.area && !obj.pathD
+  const leading = area ? obj.lineHeight || DEFAULT_LINE_HEIGHT : POINT_LEADING
+  // The SVG puts the first baseline one font size below the origin; a CSS
+  // line box puts it about (leading − 1)/2 + 0.93 em down. Nudge to match.
+  const nudge = fs * (1 - ((leading - 1) / 2 + 0.93))
+  const color = obj.fillGradient ? (obj.fillGradient.stops[0]?.color ?? '#211A43') : obj.fill
+  const style: Record<string, string> = {
     left: `${left - rect.left}px`,
-    top: `${top - rect.top}px`,
-    fontFamily: obj.fontFamily || 'Inter',
-    fontSize: `${fontSize}px`,
+    top: `${top - rect.top + nudge}px`,
+    fontFamily: cssFontFamily(obj.fontFamily || 'Inter'),
+    fontSize: `${fs}px`,
     fontWeight: String(obj.fontWeight || 400),
-    color: obj.fill || '#211A43',
-    lineHeight: '1.1',
+    lineHeight: String(leading),
+    color: isNonePaint(color) ? '#211A43' : color,
+    textAlign: obj.align || 'left',
   }
+  const rot = obj.rotation || 0
+  if (area) {
+    style.width = `${(obj.width || 0) * scale}px`
+    style.height = `${(obj.height || 0) * scale - nudge}px`
+    style.whiteSpace = 'pre-wrap'
+    style.overflowWrap = 'anywhere'
+    style.outline = '1px dashed #2563eb'
+    if (rot) {
+      style.transform = `rotate(${rot}deg)`
+      style.transformOrigin = `${((obj.width || 0) * scale) / 2}px ${((obj.height || 0) * scale) / 2 - nudge}px`
+    }
+  } else {
+    style.whiteSpace = 'pre'
+    // Point type is anchored at its origin per alignment (text-anchor).
+    const shift = obj.align === 'center' ? '-50%' : obj.align === 'right' ? '-100%' : '0'
+    style.transform = `translateX(${shift})${rot ? ` rotate(${rot}deg)` : ''}`
+    style.transformOrigin = '50% 50%'
+  }
+  inlineStyle.value = style
+  nextTick(fitInlineSize)
 }
 
-function startInlineEdit(id: string) {
+// Point type: grow the editor with its content (area type keeps its box).
+function fitInlineSize() {
+  const el = inlineInput.value
+  const edit = inlineEdit.value
+  const obj = edit ? store.getObject(edit.id) : null
+  if (!el || !obj || obj.type !== 'text' || (obj.area && !obj.pathD)) return
+  el.style.width = '0px'
+  el.style.height = '0px'
+  el.style.width = `${el.scrollWidth + 4}px`
+  el.style.height = `${el.scrollHeight}px`
+}
+
+function startInlineEdit(id: string, isNew = false) {
   const obj = store.getObject(id)
-  if (!obj || obj.type !== 'text') return
-  inlineEdit.value = { id, value: obj.text || '' }
+  if (!obj || obj.type !== 'text' || obj.locked) return
+  if (inlineEdit.value && inlineEdit.value.id !== id) commitInlineEdit()
+  store.selectObjects([id])
+  inlineEdit.value = { id, value: obj.text || '', isNew }
+  renderer?.setEditingObject(id)
   computeInlineStyle(id)
   nextTick(() => {
-    inlineInput.value?.focus()
+    const el = inlineInput.value
+    if (!el) return
+    el.focus()
+    // Caret at the end, ready to keep typing.
+    el.setSelectionRange(el.value.length, el.value.length)
   })
 }
 
 function commitInlineEdit() {
   const edit = inlineEdit.value
   inlineEdit.value = null
+  renderer?.setEditingObject(null)
   if (!edit) return
-  const value = edit.value.trim()
   const obj = store.getObject(edit.id)
-  if (!obj) return
-  if (!value) {
-    // Discard empty text objects (and the snapshot noise is acceptable).
+  if (!obj || obj.type !== 'text') return
+  if (!edit.value.trim()) {
+    // Empty text isn't kept (a new one just disappears; an edited one is
+    // deleted as its own undo step).
+    if (!edit.isNew) store.snapshot('Delete text')
     store.removeObject(edit.id)
-  } else if (obj.type === 'text' && obj.text !== edit.value) {
+  } else if (obj.text !== edit.value) {
+    if (!edit.isNew) store.snapshot('Edit text')
     store.updateObject(edit.id, { text: edit.value })
   }
 }
 
-function cancelInlineEdit() {
-  const edit = inlineEdit.value
-  inlineEdit.value = null
-  if (!edit) return
-  const obj = store.getObject(edit.id)
-  // A freshly-placed, still-empty text object is removed on cancel.
-  if (obj && obj.type === 'text' && !(obj.text || '').trim() && !edit.value.trim()) {
-    store.removeObject(edit.id)
-  }
+// ⇧⌘> / ⇧⌘< (Illustrator): font size up/down by 2 pt.
+function isFontSizeKey(e: KeyboardEvent): 1 | -1 | 0 {
+  if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return 0
+  if (e.code === 'Period' || e.key === '>') return 1
+  if (e.code === 'Comma' || e.key === '<') return -1
+  return 0
 }
 
 function onInlineKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
+  // Escape (like Illustrator) or Cmd/Ctrl+Enter finishes editing; plain Enter
+  // starts a new line.
+  if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
     e.preventDefault()
-    cancelInlineEdit()
+    e.stopPropagation()
     inlineInput.value?.blur()
     return
   }
-  // Enter commits; Shift+Enter inserts a newline.
-  if (e.key === 'Enter' && !e.shiftKey) {
+  const dir = isFontSizeKey(e)
+  if (dir && inlineEdit.value) {
     e.preventDefault()
-    commitInlineEdit()
+    store.snapshot(dir > 0 ? 'Increase font size' : 'Decrease font size')
+    store.bumpFontSize([inlineEdit.value.id], dir * 2)
+    computeInlineStyle(inlineEdit.value.id)
   }
 }
 
@@ -225,7 +283,10 @@ function onObjectResized(
   const obj = store.getObject(id)
   if (!obj) return
   store.snapshot('Resize')
-  if (obj.type === 'text') {
+  if (obj.type === 'text' && obj.area && !obj.pathD) {
+    // Area type: the box changes, the text re-flows, the font stays.
+    store.updateObject(id, { x, y, width: Math.max(10, width), height: Math.max(10, height) })
+  } else if (obj.type === 'text') {
     // Text scales its font size with the box height (keeps glyphs crisp rather
     // than transform-stretching), then stores the new box.
     const prevH = obj.height || 1
@@ -329,7 +390,21 @@ function fitBoxToView(box: Box, opts: { paddingRatio?: number; animate?: boolean
 
 // --- Interaction: object selection wiring ---------------------------------
 function wireObject(obj: RenderObject, el: any) {
+  // Double-click text with the selection tools to edit it in place.
+  el.node.addEventListener('dblclick', (e: MouseEvent) => {
+    if (store.activeTool !== 'select' && store.activeTool !== 'node') return
+    if (store.getObject(obj.id)?.type !== 'text') return
+    e.stopPropagation()
+    startInlineEdit(obj.id)
+  })
   el.node.addEventListener('mousedown', (e: MouseEvent) => {
+    // Type tool on existing text: edit it right there.
+    if (store.activeTool === 'text' && !spacePressed.value && store.getObject(obj.id)?.type === 'text') {
+      e.stopPropagation()
+      e.preventDefault()
+      startInlineEdit(obj.id)
+      return
+    }
     // Type on a path: clicking a path converts it into the guide of a new
     // text object.
     // Gradient tool: pressing an unselected object selects it, then the press
@@ -430,15 +505,14 @@ function onMouseDown(e: MouseEvent) {
   const wantPan =
     spacePressed.value ||
     tool === 'image' ||
-    tool === 'text' ||
     tool === 'textPath' ||
     tool === 'shapeBuilder' ||
     tool === 'gradient'
 
-  if (!wantPan && (tool === 'select' || isShapeTool(tool))) {
+  if (!wantPan && (tool === 'select' || tool === 'text' || isShapeTool(tool))) {
     const p = renderer.screenToCanvas(e.clientX, e.clientY)
     toolDrag = {
-      kind: tool === 'select' ? 'marquee' : 'shape',
+      kind: tool === 'select' ? 'marquee' : tool === 'text' ? 'textbox' : 'shape',
       start: p,
       current: p,
       additive: e.shiftKey,
@@ -469,6 +543,8 @@ function onMouseMove(e: MouseEvent) {
     if (box.width > 1 || box.height > 1) toolDrag.moved = true
     if (toolDrag.kind === 'marquee') {
       renderer.showMarquee(box)
+    } else if (toolDrag.kind === 'textbox') {
+      renderer.showShapePreview('rect', box)
     } else {
       const type = store.activeTool as ShapeTool
       // Lines use raw start→current so they can go in any direction.
@@ -517,6 +593,13 @@ function onMouseUp(e: MouseEvent) {
         // A click with no drag clears the selection (unless additive).
         if (!drag.additive) store.clearSelection()
       }
+    } else if (drag.kind === 'textbox') {
+      renderer.hideShapePreview()
+      // A real drag makes a text box; a click makes point type.
+      const box = normalizeDragBox(drag.start, drag.current)
+      const vb = renderer.getViewBox()
+      if (drag.moved && Math.max(box.width, box.height) > vb.width / 150) placeAreaText(drag.start, drag.current)
+      else placeText(e.clientX, e.clientY)
     } else {
       renderer.hideShapePreview()
       if (drag.moved) commitShape(store.activeTool as ShapeTool, drag.start, drag.current)
@@ -533,14 +616,10 @@ function onMouseUp(e: MouseEvent) {
   panStart = null
 }
 
-// Empty-space click behavior for the tools handled on click (text/image) and
-// the deselect fallback.
+// Empty-space click behavior for the image tool and the deselect fallback.
+// (The Type tool's click/drag is handled with the shape-style drag.)
 function handleEmptyClick(e: MouseEvent) {
   const tool = store.activeTool
-  if (tool === 'text') {
-    placeText(e.clientX, e.clientY)
-    return
-  }
   if (tool === 'image') {
     placeImage(e.clientX, e.clientY)
     return
@@ -889,8 +968,27 @@ function placeText(clientX: number, clientY: number) {
     artboardId: artboard?.id ?? null,
     semanticRole: 'bodyText',
   })
-  store.selectObjects([obj.id])
-  startInlineEdit(obj.id)
+  startInlineEdit(obj.id, true)
+}
+
+// Type tool drag: an area-type box (Illustrator's text box). The text wraps
+// inside it and resizing the box re-flows the text instead of scaling it.
+function placeAreaText(start: { x: number; y: number }, end: { x: number; y: number }) {
+  const box = normalizeDragBox(start, end)
+  const artboard = resolveArtboardAtPoint(store.artboards, start)
+  store.snapshot('Add text box')
+  const obj = store.addObject({
+    type: 'text',
+    text: '',
+    area: true,
+    x: box.x - (artboard?.x ?? 0),
+    y: box.y - (artboard?.y ?? 0),
+    width: Math.max(20, box.width),
+    height: Math.max(24, box.height),
+    artboardId: artboard?.id ?? null,
+    semanticRole: 'bodyText',
+  })
+  startInlineEdit(obj.id, true)
 }
 
 // --- Image tool: place the staged image -----------------------------------
@@ -1417,15 +1515,25 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
   z-index: 30;
   margin: 0;
   padding: 0;
-  border: 1px dashed #2563eb;
+  border: none;
   outline: none;
-  background: rgba(255, 255, 255, 0.85);
+  /* Transparent: the text appears to be edited right on the canvas. */
+  background: transparent;
+  caret-color: #2563eb;
   resize: none;
   overflow: hidden;
-  min-width: 40px;
+  min-width: 4px;
   min-height: 1em;
   white-space: pre;
-  transform-origin: top left;
+  box-sizing: content-box;
+  font-kerning: normal;
+}
+.inline-text-editor::selection {
+  background: rgba(37, 99, 235, 0.25);
+}
+/* The SVG text under the editor is hidden while it's being edited. */
+:deep(.canvas-object.is-editing) {
+  visibility: hidden;
 }
 :deep(.canvas-object) {
   cursor: pointer;

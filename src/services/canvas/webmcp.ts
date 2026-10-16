@@ -41,6 +41,8 @@ export interface FontData {
   fullName: string
   family: string
   style: string
+  // The font file (used for Create Outlines).
+  blob?: () => Promise<Blob>
 }
 
 declare global {

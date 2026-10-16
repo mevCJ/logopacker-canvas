@@ -156,6 +156,12 @@ export interface TextObject extends BaseObject {
   fill: string
   fillGradient?: GradientFill
   align: TextAlign | string
+  // Area type (Illustrator's text box): text wraps inside width × height and
+  // resizing the box re-flows it without scaling the font. Point type (the
+  // default) is unwrapped and scales its font when resized.
+  area?: boolean
+  // Line spacing as a multiple of the font size (default 1.2).
+  lineHeight?: number
   // Text on a path: when set, glyphs flow along this path (in the text's local
   // frame) instead of a straight baseline. `pathOffset` is the start offset
   // along the path in percent (0..100).
@@ -848,6 +854,25 @@ export const useCanvasStore = defineStore('canvas', {
       if (stroke !== undefined) patch.stroke = stroke
       if (strokeWidth !== undefined) patch.strokeWidth = strokeWidth
       return this.updateObject(id, patch)
+    },
+    // Step the font size of text objects (Illustrator's ⇧⌘> / ⇧⌘<). Point
+    // type keeps its box proportional; area type keeps its box.
+    bumpFontSize(ids: string[], delta: number): string[] {
+      const changed: string[] = []
+      for (const id of ids) {
+        const o = this.objects[id]
+        if (!o || o.type !== 'text') continue
+        const prev = o.fontSize || 24
+        const next = Math.max(1, Math.min(1296, Math.round(prev + delta)))
+        if (next === prev) continue
+        o.fontSize = next
+        if (!o.area && !o.pathD) {
+          o.width = (o.width || 0) * (next / prev)
+          o.height = (o.height || 0) * (next / prev)
+        }
+        changed.push(id)
+      }
+      return changed
     },
     setOpacity(id: string, opacity: number): CanvasObject | null {
       return this.updateObject(id, { opacity })

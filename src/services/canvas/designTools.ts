@@ -19,6 +19,7 @@ import { CleanupSession, decodePhoto } from '@/services/capture/cleanupClient'
 import { CLEANUP_DEFAULTS, type ColorFilter } from '@/services/capture/sketchCleanup'
 import { placeSketch } from '@/services/capture/placeSketch'
 import { openSketchDialog } from '@/services/capture/captureState'
+import { createOutlines } from './textOutlines'
 
 export function buildDesignTools(
   store: CanvasStore,
@@ -348,6 +349,28 @@ export function buildDesignTools(
           return fail('Clean up sketch', err)
         } finally {
           session.dispose()
+        }
+      },
+    },
+    {
+      name: 'create_outlines',
+      description:
+        'Converts text objects into vector paths (Type > Create Outlines): one compound path per text object, keeping its fill, so the wordmark no longer depends on the font and its letters can be reshaped. Needs the font file: bundled Inter always works; other fonts need installed-font access or an added font file.',
+      inputSchema: {
+        type: 'object',
+        properties: { ids: { type: 'array', items: { type: 'string' } } },
+        required: ['ids'],
+      },
+      async execute({ ids }: { ids: string[] }) {
+        store.snapshot('Create outlines')
+        try {
+          const out = await createOutlines(store, ids)
+          store.selectObjects(out)
+          log(`Outlined ${out.length} text object(s)`)
+          return text({ created: out })
+        } catch (err) {
+          store.undo()
+          return fail('Create outlines', err)
         }
       },
     },

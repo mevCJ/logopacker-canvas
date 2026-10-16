@@ -38,6 +38,10 @@ function objView(o: CanvasObject | null): Record<string, unknown> | null {
     base.fontWeight = o.fontWeight
     base.fill = o.fill
     base.align = o.align
+    if (o.area) {
+      base.area = true
+      base.lineHeight = o.lineHeight ?? 1.2
+    }
     if (o.pathD) {
       base.onPath = true
       base.pathOffset = o.pathOffset ?? 0
@@ -90,7 +94,7 @@ const COMMON_PROPS = [
 
 const TYPE_PROPS: Record<string, readonly string[]> = {
   path: ['d', 'fill', 'stroke', 'strokeWidth', 'cornerRadius'],
-  text: ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align', 'pathOffset'],
+  text: ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align', 'pathOffset', 'area', 'lineHeight'],
   image: ['href', 'sourceUrl', 'alt'],
 }
 

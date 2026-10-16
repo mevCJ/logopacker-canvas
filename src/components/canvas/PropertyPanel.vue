@@ -140,22 +140,40 @@
 
         <section class="pp-section">
           <label class="pp-label">Font</label>
-          <select class="pp-select" :value="selected.fontFamily" @change="update({ fontFamily: val($event) })">
-            <option v-for="f in fonts" :key="f.value" :value="f.value">{{ f.label }}</option>
-          </select>
+          <FontPicker :model-value="selected.fontFamily" @update:model-value="editText({ fontFamily: $event })" />
         </section>
 
         <section class="pp-section pp-row-2">
           <div>
             <label class="pp-label">Size</label>
-            <input type="number" min="1" class="pp-number" :value="selected.fontSize" @input="update({ fontSize: num($event) })" />
+            <input type="number" min="1" class="pp-number" :value="selected.fontSize" @change="editText({ fontSize: Math.max(1, num($event)) })" />
           </div>
           <div>
             <label class="pp-label">Weight</label>
-            <select class="pp-select" :value="selected.fontWeight" @change="update({ fontWeight: num($event) })">
-              <option v-for="w in weights" :key="w.value" :value="w.value">{{ w.label }}</option>
+            <select class="pp-select" :value="selected.fontWeight" @change="editText({ fontWeight: num($event) })">
+              <option v-for="w in weightOptions(selected.fontFamily)" :key="w.value" :value="w.value">{{ w.label }}</option>
             </select>
           </div>
+        </section>
+
+        <section v-if="!selected.pathD" class="pp-section">
+          <label class="pp-label">Type</label>
+          <div class="pp-align">
+            <button class="pp-align-btn" :class="{ active: !selected.area }" title="Point type: no wrapping; resizing scales the text" @click="setArea(false)">Point</button>
+            <button class="pp-align-btn" :class="{ active: selected.area }" title="Area type: wraps inside a box; resizing re-flows the text" @click="setArea(true)">Area</button>
+          </div>
+        </section>
+
+        <section v-if="selected.area" class="pp-section">
+          <label class="pp-label">Leading <span class="pp-value">{{ (selected.lineHeight || 1.2).toFixed(2) }}×</span></label>
+          <input type="range" min="0.8" max="2.5" step="0.05" class="pp-range" :value="selected.lineHeight || 1.2" @pointerdown="store.snapshot('Leading')" @input="update({ lineHeight: num($event) })" />
+        </section>
+
+        <section class="pp-section">
+          <button type="button" class="pp-ghost-btn" title="Convert the text to vector paths (Shift+Cmd/Ctrl+O)" :disabled="busy" @click="outlines">
+            Create Outlines
+          </button>
+          <p v-if="opError" class="pp-error">{{ opError }}</p>
         </section>
 
         <section class="pp-section">
@@ -250,21 +268,20 @@
 import { computed, reactive, ref, watch } from 'vue'
 import ColorPicker from './ColorPicker.vue'
 import FillControl from './FillControl.vue'
+import FontPicker from './FontPicker.vue'
+import { weightOptions } from '@/services/canvas/fontLibrary'
+import { createOutlines } from '@/services/canvas/textOutlines'
 import { applyPathfinder, type PathfinderOp } from '@/services/canvas/pathBoolean'
 import { vectorizeImageObject, VECTORIZE_DEFAULTS } from '@/services/canvas/vectorize'
 import { documentColors } from '@/services/canvas/documentColors'
 import {
   useCanvasStore,
-  FONT_FAMILIES,
-  FONT_WEIGHTS,
   TEXT_ALIGNMENTS,
   SEMANTIC_ROLES,
 } from '@/stores/canvas'
 
 const store = useCanvasStore()
 
-const fonts = FONT_FAMILIES
-const weights = FONT_WEIGHTS
 const alignments = TEXT_ALIGNMENTS
 const roles = SEMANTIC_ROLES
 
@@ -339,6 +356,49 @@ function setMultiFill(v: string) {
 }
 function setMultiOpacity(v: number) {
   for (const o of multi.value) store.setOpacity(o.id, v)
+}
+
+// Text edits from the panel are one undo step each.
+function editText(patch: Record<string, unknown>) {
+  if (!selected.value) return
+  store.snapshot('Edit text')
+  store.updateObject(selected.value.id, patch)
+}
+
+// Point ⇄ area type. Both put the first baseline one font size below the
+// origin, so the origin stays and the box is sized to the drawn text.
+function setArea(area: boolean) {
+  const o = selected.value
+  if (!o || o.type !== 'text' || !!o.area === area) return
+  store.snapshot(area ? 'Convert to area type' : 'Convert to point type')
+  if (area) {
+    const b = store.objectCanvasBounds(o.id)
+    const ab = o.artboardId ? store.getArtboard(o.artboardId) : null
+    const ox = (ab?.x ?? 0) + o.x
+    const oy = (ab?.y ?? 0) + o.y
+    const fs = o.fontSize || 24
+    const width = Math.max(40, Math.ceil(b ? b.x + b.width - ox : o.width) + 4)
+    const height = Math.max(fs * 1.4, Math.ceil(b ? b.y + b.height - oy : o.height) + fs * 0.3)
+    store.updateObject(o.id, { area: true, width, height })
+  } else {
+    store.updateObject(o.id, { area: false })
+  }
+}
+
+async function outlines() {
+  const o = selected.value
+  if (!o || o.type !== 'text' || busy.value) return
+  busy.value = true
+  opError.value = ''
+  store.snapshot('Create outlines')
+  try {
+    store.selectObjects(await createOutlines(store, [o.id]))
+  } catch (err) {
+    store.undo()
+    opError.value = (err as Error).message
+  } finally {
+    busy.value = false
+  }
 }
 
 function releaseTextPath() {

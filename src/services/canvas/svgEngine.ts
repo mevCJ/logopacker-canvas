@@ -11,6 +11,7 @@ import { SVG } from '@svgdotjs/svg.js'
 import '@svgdotjs/svg.draggable.js'
 import { splitPaint } from './color'
 import { gradientId, gradientMarkup, type GradientFill } from './gradient'
+import { layoutAreaText } from './textLayout'
 
 export interface Box {
   x: number
@@ -50,6 +51,8 @@ export interface RenderObject {
   href?: string
   pathD?: string
   pathOffset?: number
+  area?: boolean
+  lineHeight?: number
   fillGradient?: GradientFill
   name?: string
   hidden?: boolean
@@ -1075,6 +1078,10 @@ export class CanvasRenderer {
     // to 100×100, and a path's `d` can start off-origin. Measure the element's
     // local bbox (the platform already knows the exact geometry bounds) and map
     // it through the object's translate + scale so the outline hugs the shape.
+    // Area type: the box itself is the bounds (text inside may be shorter).
+    if (obj.type === 'text' && obj.area && !obj.pathD) {
+      return { x: originX, y: originY, width: obj.width || 0, height: obj.height || 0 }
+    }
     if (obj.type === 'path' || obj.type === 'text') {
       const el = this._objectEls.get(obj.id)
       if (el) {
@@ -1357,6 +1364,16 @@ export class CanvasRenderer {
     const hs = Math.max(6, vb.width / 90) // handle square size in canvas units
     const rotOffset = hs * 2.2
     const local = handlePositions(box, rotOffset)
+
+    // Overflowing area type: Illustrator's red "+" in the bottom-right port.
+    if (obj.type === 'text' && obj.area && this._objectEls.get(obj.id)?.node.getAttribute('data-overflow')) {
+      const s = hs * 1.4
+      // Just outside the bottom-right corner, clear of the text and handles.
+      const p = rp({ x: box.x + box.width - s * 1.6, y: box.y + box.height + s * 1.3 })
+      const g = this.overlayLayer.group().attr({ 'pointer-events': 'none' })
+      g.rect(s, s).center(p.x, p.y).fill('#ffffff').stroke({ color: '#dc2626', width: strokeW * 1.5 })
+      g.path(`M${p.x - s * 0.3} ${p.y}H${p.x + s * 0.3}M${p.x} ${p.y - s * 0.3}V${p.y + s * 0.3}`).stroke({ color: '#dc2626', width: strokeW * 1.5 })
+    }
 
     // Line from top-middle to the rotation handle.
     const topMid = rp(local.n)
@@ -1708,6 +1725,36 @@ export class CanvasRenderer {
     this._gradientDefs.set(obj.id, { el, markup })
   }
 
+  // Area type: one <tspan> per wrapped line that fits the box. Overflow is
+  // flagged on the element for the selection overlay's marker.
+  private _applyAreaText(obj: RenderObject, el: SvgEl): void {
+    const NS = 'http://www.w3.org/2000/svg'
+    const node = el.node as SVGTextElement
+    const { lines, overflow } = layoutAreaText(obj)
+    node.textContent = ''
+    for (const line of lines) {
+      const t = document.createElementNS(NS, 'tspan')
+      t.setAttribute('x', String(line.x))
+      t.setAttribute('y', String(line.y))
+      t.textContent = line.text
+      node.appendChild(t)
+    }
+    node.removeAttribute('x')
+    node.removeAttribute('y')
+    node.style.whiteSpace = 'pre'
+    if (overflow) node.setAttribute('data-overflow', '1')
+    else node.removeAttribute('data-overflow')
+  }
+
+  // Hide a text object while it's being edited in place (the editor overlay
+  // draws the live text instead).
+  private _editingId: string | null = null
+  setEditingObject(id: string | null): void {
+    if (this._editingId) this._objectEls.get(this._editingId)?.removeClass('is-editing')
+    this._editingId = id
+    if (id) this._objectEls.get(id)?.addClass('is-editing')
+  }
+
   // Lay text out along its guide path: a <defs> path (in the text's local
   // frame) referenced by a <textPath> child. Returns false for plain text.
   private _applyTextPath(obj: RenderObject, el: SvgEl): boolean {
@@ -1795,8 +1842,12 @@ export class CanvasRenderer {
       el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy, c.cx, c.cy))
     } else if (obj.type === 'text') {
       const onPath = this._applyTextPath(obj, el)
-      if (!onPath) el.text(obj.text || '')
+      const isArea = !onPath && !!obj.area
+      if (isArea) this._applyAreaText(obj, el)
+      else if (!onPath) el.text(obj.text || '')
       el.attr(textAttrs(obj))
+      // Area type is clickable anywhere over its text block, not just glyphs.
+      if (isArea && !obj.locked) el.attr('pointer-events', 'bounding-box')
       // Apply typography as INLINE STYLE, not just presentation attributes.
       // The global reset (`*, *::before, *::after { font-weight: normal }` in
       // base.css) sets font-weight via a CSS selector, which beats an SVG
@@ -1812,8 +1863,9 @@ export class CanvasRenderer {
       }
       // Text carries its size via fontSize (no scale distortion); only rotate.
       // Rotate about the glyph bbox center so rotation anchors on the visible text.
-      if (!onPath) el.attr({ x: 0, y: obj.fontSize || 24 })
-      const c = this._geometryCenter(el, dispW, dispH, 1, 1)
+      if (!onPath && !isArea) el.attr({ x: 0, y: obj.fontSize || 24 })
+      // Area type rotates about its box center; others about their glyphs.
+      const c = isArea ? { cx: dispW / 2, cy: dispH / 2 } : this._geometryCenter(el, dispW, dispH, 1, 1)
       el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, c.cx, c.cy))
     } else if (obj.type === 'image') {
       el.attr(imageAttrs(obj))

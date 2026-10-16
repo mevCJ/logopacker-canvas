@@ -15,6 +15,7 @@ import {
   type RenderObject,
 } from './svgEngine'
 import { gradientId, gradientMarkup } from './gradient'
+import { layoutAreaText } from './textLayout'
 
 // Loose artboard shape (a subset of the store's Artboard) needed for export.
 export interface ExportArtboard {
@@ -92,6 +93,16 @@ export function objectSvgMarkup(
   if (obj.type === 'text') {
     // Text carries its size via fontSize (no scale); baseline at y = fontSize.
     const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1)
+    if (obj.area && !obj.pathD) {
+      // Area type: pre-wrapped lines (same layout as the canvas), rotated
+      // about the box center.
+      const t = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1)
+      const attrs = serializeAttrs({ ...textAttrs(obj), transform: t, 'xml:space': 'preserve' })
+      const tspans = layoutAreaText(obj)
+        .lines.map((l) => `<tspan x="${l.x}" y="${l.y}">${escapeXml(l.text)}</tspan>`)
+        .join('')
+      return `<text${attrs}>${tspans}</text>`
+    }
     if (obj.pathD) {
       // Text on a path: the guide path lives in <defs> in the text's local
       // frame (textPath geometry is read in the referencing text's user space).

@@ -66,15 +66,14 @@
       <template v-if="single && single.type === 'text'">
         <span class="cb-sep" />
         <div class="cb-field">
-          <select class="cb-select" title="Font family" :value="single.fontFamily" @change="updateSingle({ fontFamily: val($event) })">
-            <option v-for="f in FONT_FAMILIES" :key="f.value" :value="f.value">{{ f.label }}</option>
-          </select>
+          <FontPicker compact :model-value="single.fontFamily" @update:model-value="updateSingle({ fontFamily: $event })" />
           <select class="cb-select cb-select-s" title="Font weight" :value="single.fontWeight" @change="updateSingle({ fontWeight: Number(val($event)) })">
-            <option v-for="w in FONT_WEIGHTS" :key="w.value" :value="w.value">{{ w.label }}</option>
+            <option v-for="w in weightOptions(single.fontFamily)" :key="w.value" :value="w.value">{{ w.label }}</option>
           </select>
-          <input type="number" min="1" class="cb-num cb-num-s" title="Font size" :value="single.fontSize" @change="updateSingle({ fontSize: Math.max(1, num($event)) })" />
+          <input type="number" min="1" class="cb-num cb-num-s" title="Font size (Shift+Cmd/Ctrl+> / <)" :value="single.fontSize" @change="updateSingle({ fontSize: Math.max(1, num($event)) })" />
           <span class="cb-unit">pt</span>
         </div>
+        <button type="button" class="cb-btn" title="Convert to vector paths (Shift+Cmd/Ctrl+O)" @click="outlines">Create Outlines</button>
       </template>
 
       <template v-if="single && single.type === 'image'">
@@ -154,8 +153,6 @@ import ColorPicker from './ColorPicker.vue'
 import FillControl from './FillControl.vue'
 import {
   useCanvasStore,
-  FONT_FAMILIES,
-  FONT_WEIGHTS,
   type AlignEdge,
   type PathObject,
   type TextObject,
@@ -165,6 +162,9 @@ import { isNonePaint } from '@/services/canvas/color'
 import { documentColors } from '@/services/canvas/documentColors'
 import { vectorizeImageObject } from '@/services/canvas/vectorize'
 import { openSketchDialog } from '@/services/capture/captureState'
+import FontPicker from './FontPicker.vue'
+import { weightOptions } from '@/services/canvas/fontLibrary'
+import { createOutlines } from '@/services/canvas/textOutlines'
 
 const emit = defineEmits<{ (e: 'fit-view'): void }>()
 const store = useCanvasStore()
@@ -301,6 +301,18 @@ async function imageTrace() {
     window.alert((err as Error).message)
   } finally {
     busy.value = false
+  }
+}
+
+async function outlines() {
+  const o = single.value
+  if (!o || o.type !== 'text') return
+  store.snapshot('Create outlines')
+  try {
+    store.selectObjects(await createOutlines(store, [o.id]))
+  } catch (err) {
+    store.undo()
+    window.alert((err as Error).message)
   }
 }
 
