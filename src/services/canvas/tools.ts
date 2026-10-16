@@ -23,6 +23,9 @@ function objView(o: CanvasObject | null): Record<string, unknown> | null {
     height: o.height,
     opacity: o.opacity,
   }
+  if (o.name) base.name = o.name
+  if (o.hidden) base.hidden = true
+  if (o.locked) base.locked = true
   if (o.type === 'path') {
     base.fill = o.fill
     base.stroke = o.stroke
@@ -34,6 +37,10 @@ function objView(o: CanvasObject | null): Record<string, unknown> | null {
     base.fontWeight = o.fontWeight
     base.fill = o.fill
     base.align = o.align
+    if (o.pathD) {
+      base.onPath = true
+      base.pathOffset = o.pathOffset ?? 0
+    }
   } else if (o.type === 'image') {
     base.href = o.href
     base.alt = o.alt
@@ -75,11 +82,14 @@ const COMMON_PROPS = [
   'opacity',
   'semanticRole',
   'artboardId',
+  'name',
+  'hidden',
+  'locked',
 ] as const
 
 const TYPE_PROPS: Record<string, readonly string[]> = {
   path: ['d', 'fill', 'stroke', 'strokeWidth', 'cornerRadius'],
-  text: ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align'],
+  text: ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align', 'pathOffset'],
   image: ['href', 'sourceUrl', 'alt'],
 }
 
@@ -115,6 +125,13 @@ function applyProps(
     if (value === undefined || !allowed.has(key)) continue
     if (key === 'cornerRadius') {
       store.setCornerRadius(o.id, Number(value))
+      applied.push(key)
+      continue
+    }
+    // Hiding/locking also drops the object from the selection.
+    if (key === 'hidden' || key === 'locked') {
+      if (key === 'hidden') store.setObjectHidden(o.id, !!value)
+      else store.setObjectLocked(o.id, !!value)
       applied.push(key)
       continue
     }
@@ -478,7 +495,7 @@ export function buildCanvasTools(
         properties: {
           ids: { type: 'array', items: { type: 'string' } },
           role: { type: 'string' },
-          fill: { type: 'string', description: 'CSS color, e.g. #000000.' },
+          fill: { type: 'string', description: 'CSS color, e.g. #000000, rgba(0, 0, 0, 0.5) for a translucent fill, or none.' },
         },
         required: ['fill'],
       },

@@ -22,7 +22,10 @@
       <div v-if="showExport" class="export-overlay" @mousedown="showExport = false">
         <ExportDialog @close="showExport = false" />
       </div>
-      <PropertyPanel />
+      <div class="right-col">
+        <PropertyPanel class="right-props" />
+        <LayersPanel class="right-layers" />
+      </div>
       <Transition name="activity-slide">
         <AgentActivityLog v-if="showActivity" />
       </Transition>
@@ -37,6 +40,7 @@ import { seedNova } from '@/services/canvas/novaSeed'
 import { registerCanvasTools } from '@/services/canvas/tools'
 import { buildImageTextTools } from '@/services/canvas/imageTextTools'
 import { buildFileSystemTools } from '@/services/canvas/fileSystemTools'
+import { buildDesignTools } from '@/services/canvas/designTools'
 import { saveDocumentToFile, parseDocumentFile } from '@/services/canvas/documentIO'
 import CanvasStage from '@/components/canvas/CanvasStage.vue'
 import Toolbar from '@/components/canvas/Toolbar.vue'
@@ -44,6 +48,7 @@ import ToolSidebar from '@/components/canvas/ToolSidebar.vue'
 import ImageToolPopover from '@/components/canvas/ImageToolPopover.vue'
 import ExportDialog from '@/components/canvas/ExportDialog.vue'
 import PropertyPanel from '@/components/canvas/PropertyPanel.vue'
+import LayersPanel from '@/components/canvas/LayersPanel.vue'
 import AgentActivityLog from '@/components/canvas/AgentActivityLog.vue'
 
 const store = useCanvasStore()
@@ -122,7 +127,11 @@ onMounted(() => {
   }
   // Register WebMCP tools so an external agent can operate the canvas.
   unregisterTools = registerCanvasTools(store, {
-    extraTools: (s, logger) => [...buildImageTextTools(s, logger), ...buildFileSystemTools(s, logger)],
+    extraTools: (s, logger) => [
+      ...buildImageTextTools(s, logger),
+      ...buildFileSystemTools(s, logger),
+      ...buildDesignTools(s, logger),
+    ],
   })
 })
 
@@ -168,6 +177,25 @@ onBeforeUnmount(() => {
   background-color: #ececed;
   background-image: radial-gradient(circle, rgba(0, 0, 0, 0.06) 1px, transparent 1px);
   background-size: 22px 22px;
+}
+/* Right column: properties on top, layers below, each scrolling on its own. */
+.right-col {
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #fff;
+  border-left: 1px solid #e4e4e7;
+}
+.right-props {
+  flex: 1 1 60%;
+  min-height: 0;
+}
+.right-layers {
+  flex: 0 0 40%;
+  min-height: 0;
+  border-top: 1px solid #e4e4e7;
 }
 /* Full-screen dimmed overlay that centers the export dialog. */
 .export-overlay {

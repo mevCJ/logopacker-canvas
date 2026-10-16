@@ -26,7 +26,20 @@ export type ObjectType = (typeof OBJECT_TYPES)[number]
 
 // User-facing canvas tools (the floating tool sidebar). 'select' is the idle
 // default; the others arm a creation mode until the user switches back.
-export const TOOL_IDS = ['select', 'node', 'text', 'pen', 'rect', 'ellipse', 'line', 'image'] as const
+// 'textPath' types along an existing path; 'shapeBuilder' merges/deletes the
+// overlapping regions of the selected paths.
+export const TOOL_IDS = [
+  'select',
+  'node',
+  'text',
+  'textPath',
+  'pen',
+  'rect',
+  'ellipse',
+  'line',
+  'image',
+  'shapeBuilder',
+] as const
 export type ToolId = (typeof TOOL_IDS)[number]
 
 // A staged image chosen (uploaded or picked from Pexels) but not yet placed.
@@ -59,6 +72,11 @@ export const FONT_WEIGHTS = [
 export const TEXT_ALIGNMENTS = ['left', 'center', 'right'] as const
 export type TextAlign = (typeof TEXT_ALIGNMENTS)[number]
 
+// Preview paints objects normally; outline draws every object as a thin
+// unfilled wireframe (Illustrator's Outline view) to inspect construction.
+export const VIEW_MODES = ['preview', 'outline'] as const
+export type ViewMode = (typeof VIEW_MODES)[number]
+
 export interface Artboard {
   id: string
   name: string
@@ -86,6 +104,11 @@ interface BaseObject {
   baseHeight: number
   rotation: number
   opacity: number
+  // Layers panel state. `name` overrides the auto label; hidden objects aren't
+  // drawn or exported; locked objects can't be picked on the canvas.
+  name?: string
+  hidden?: boolean
+  locked?: boolean
 }
 
 export interface PathObject extends BaseObject {
@@ -124,6 +147,11 @@ export interface TextObject extends BaseObject {
   fontWeight: number
   fill: string
   align: TextAlign | string
+  // Text on a path: when set, glyphs flow along this path (in the text's local
+  // frame) instead of a straight baseline. `pathOffset` is the start offset
+  // along the path in percent (0..100).
+  pathD?: string
+  pathOffset?: number
 }
 
 export interface ImageObject extends BaseObject {
@@ -193,6 +221,7 @@ export interface CanvasState {
   currentGroup: string | null
   activeTool: ToolId
   pendingImage: PendingImage | null
+  viewMode: ViewMode
   _idCounter: number
 }
 
@@ -304,6 +333,7 @@ export const useCanvasStore = defineStore('canvas', {
     currentGroup: null,
     activeTool: 'select',
     pendingImage: null,
+    viewMode: 'preview',
     _idCounter: 0,
   }),
 
@@ -595,6 +625,39 @@ export const useCanvasStore = defineStore('canvas', {
       this.objectOrder.unshift(id)
       return true
     },
+    // Move an object to an exact paint-order index (0 = backmost), clamped.
+    reorderObject(id: string, index: number): boolean {
+      const i = this.objectOrder.indexOf(id)
+      if (i === -1) return false
+      this.objectOrder.splice(i, 1)
+      const to = Math.max(0, Math.min(this.objectOrder.length, Math.round(index)))
+      this.objectOrder.splice(to, 0, id)
+      return true
+    },
+    // Step one place up (toward the front) or down in paint order.
+    shiftObject(id: string, delta: 1 | -1): boolean {
+      const i = this.objectOrder.indexOf(id)
+      if (i === -1) return false
+      return this.reorderObject(id, i + delta)
+    },
+
+    // ---- Layer state (layers panel) ----------------------------------------
+    // Hiding or locking an object also drops it from the selection, since it
+    // can no longer be seen/picked on the canvas.
+    setObjectHidden(id: string, hidden: boolean): CanvasObject | null {
+      const obj = this.updateObject(id, { hidden })
+      if (obj && hidden) this.selectedIds = this.selectedIds.filter((s) => s !== id)
+      return obj
+    },
+    setObjectLocked(id: string, locked: boolean): CanvasObject | null {
+      const obj = this.updateObject(id, { locked })
+      if (obj && locked) this.selectedIds = this.selectedIds.filter((s) => s !== id)
+      return obj
+    },
+    renameObject(id: string, name: string): CanvasObject | null {
+      const trimmed = name.trim()
+      return this.updateObject(id, { name: trimmed || undefined })
+    },
 
     assignToArtboard(id: string, artboardId: string | null): CanvasObject | null {
       const obj = this.objects[id]
@@ -802,7 +865,11 @@ export const useCanvasStore = defineStore('canvas', {
     // ---- Selection ---------------------------------------------------------
     selectObjects(ids: string[] | string = []): string[] {
       const arr = Array.isArray(ids) ? ids : [ids]
-      this.selectedIds = arr.filter((id) => !!this.objects[id])
+      // Hidden and locked objects are not selectable (layers panel rules).
+      this.selectedIds = arr.filter((id) => {
+        const o = this.objects[id]
+        return !!o && !o.hidden && !o.locked
+      })
       // Object and artboard selection are mutually exclusive.
       if (this.selectedIds.length) this.selectedArtboardId = null
       return this.selectedIds
@@ -837,6 +904,13 @@ export const useCanvasStore = defineStore('canvas', {
     resetToolState(): void {
       this.activeTool = 'select'
       this.pendingImage = null
+    },
+    setViewMode(mode: ViewMode): ViewMode {
+      this.viewMode = VIEW_MODES.includes(mode) ? mode : 'preview'
+      return this.viewMode
+    },
+    toggleViewMode(): ViewMode {
+      return this.setViewMode(this.viewMode === 'outline' ? 'preview' : 'outline')
     },
 
     // ---- Snapshot / Undo ---------------------------------------------------

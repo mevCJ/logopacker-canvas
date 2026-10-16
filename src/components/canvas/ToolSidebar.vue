@@ -39,6 +39,19 @@
 
     <button
       class="tool-btn"
+      :class="{ active: activeTool === 'textPath' }"
+      title="Type on a path (click a path)"
+      @click="pick('textPath')"
+    >
+      <!-- a T riding a curve -->
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M3 19c4-6 12-6 18 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="1 3" />
+        <path d="M8 5h8M12 5v9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </svg>
+    </button>
+
+    <button
+      class="tool-btn"
       :class="{ active: activeTool === 'pen' }"
       title="Pen (P)"
       @click="pick('pen')"
@@ -87,6 +100,19 @@
         </div>
       </Transition>
     </div>
+
+    <button
+      class="tool-btn"
+      :class="{ active: activeTool === 'shapeBuilder' }"
+      title="Shape Builder (Shift+M) — select overlapping shapes, drag across regions to merge, Alt-drag to erase"
+      @click="pick('shapeBuilder')"
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <circle cx="9" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="2" />
+        <circle cx="15" cy="14" r="6" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M12 9.5a6 6 0 013 4.5 6 6 0 01-3 .5 6 6 0 01-3-4.5 6 6 0 013-.5z" fill="currentColor" />
+      </svg>
+    </button>
 
     <button
       ref="imageBtn"

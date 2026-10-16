@@ -20,7 +20,8 @@
 
 import svgpath from 'svgpath'
 import { parseSvg, readViewBox } from './novaSeed'
-import type { PathNode } from './svgEngine'
+import { nodesBounds, nodesToPathData, translateNodes, type PathNode } from './svgEngine'
+import type { CanvasStore } from '@/stores/canvas'
 
 interface Subpath {
   nodes: PathNode[]
@@ -218,4 +219,59 @@ export function svgToPathObjects(markup: string): SvgPathsResult | null {
   }
   if (paths.length === 0) return null
   return { viewBox, paths }
+}
+
+// Add parsed paths to the store as node-editable path objects. `map` takes a
+// point in the SVG's own (viewBox) coordinates to artboard-local coordinates;
+// `scale` is the matching uniform factor for stroke widths. Each path is
+// rebased so its object origin is its geometry's top-left, matching how
+// pen/shape paths are stored. Returns the new object ids (paint order).
+export function placeImportedPaths(
+  store: CanvasStore,
+  paths: ImportedPath[],
+  opts: {
+    map: (x: number, y: number) => { x: number; y: number }
+    scale: number
+    artboardId: string | null
+    semanticRole?: string
+  },
+): string[] {
+  const ids: string[] = []
+  for (const p of paths) {
+    const placed: PathNode[] = p.nodes.map((n) => {
+      const a = opts.map(n.x, n.y)
+      const out: PathNode = { x: a.x, y: a.y }
+      if (n.inX !== undefined && n.inY !== undefined) {
+        const h = opts.map(n.inX, n.inY)
+        out.inX = h.x
+        out.inY = h.y
+      }
+      if (n.outX !== undefined && n.outY !== undefined) {
+        const h = opts.map(n.outX, n.outY)
+        out.outX = h.x
+        out.outY = h.y
+      }
+      return out
+    })
+    const bounds = nodesBounds(placed)
+    const rel = translateNodes(placed, -bounds.x, -bounds.y)
+    const obj = store.addObject({
+      type: 'path',
+      d: nodesToPathData(rel, p.closed, p.subpaths),
+      nodes: rel,
+      closed: p.closed,
+      subpaths: p.subpaths,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      fill: p.fill,
+      stroke: p.stroke,
+      strokeWidth: p.strokeWidth * opts.scale,
+      artboardId: opts.artboardId,
+      semanticRole: opts.semanticRole ?? 'decorative',
+    })
+    ids.push(obj.id)
+  }
+  return ids
 }

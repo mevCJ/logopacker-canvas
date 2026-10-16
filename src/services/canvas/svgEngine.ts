@@ -9,6 +9,7 @@
 // use loosely-typed element references.
 import { SVG } from '@svgdotjs/svg.js'
 import '@svgdotjs/svg.draggable.js'
+import { splitPaint } from './color'
 
 export interface Box {
   x: number
@@ -46,6 +47,11 @@ export interface RenderObject {
   fontWeight?: number
   align?: string
   href?: string
+  pathD?: string
+  pathOffset?: number
+  name?: string
+  hidden?: boolean
+  locked?: boolean
 }
 
 interface RenderArtboard {
@@ -102,11 +108,21 @@ export function absolutePosition(
   return { x: ax + (obj.x || 0), y: ay + (obj.y || 0) }
 }
 
+// Paint attrs for a stored color string. A translucent rgba() paint is split
+// into an opaque color + *-opacity so exported SVG stays portable. Opaque
+// colors pass through verbatim. The *-opacity key is always emitted so a
+// reused DOM element never keeps a stale alpha after the color turns opaque.
+function paintAttrs(kind: 'fill' | 'stroke', value: string | null | undefined, fallback: string) {
+  if (value == null) return { [kind]: fallback, [`${kind}-opacity`]: 1 }
+  const { color, opacity } = splitPaint(value)
+  return { [kind]: opacity < 1 ? color : value, [`${kind}-opacity`]: opacity }
+}
+
 export function pathAttrs(obj: RenderObject): Record<string, string | number> {
   return {
     d: obj.d || '',
-    fill: obj.fill == null ? 'none' : obj.fill,
-    stroke: obj.stroke == null ? 'none' : obj.stroke,
+    ...paintAttrs('fill', obj.fill, 'none'),
+    ...paintAttrs('stroke', obj.stroke, 'none'),
     'stroke-width': obj.strokeWidth || 0,
     opacity: obj.opacity == null ? 1 : obj.opacity,
   }
@@ -132,7 +148,7 @@ export function textAttrs(obj: RenderObject): Record<string, string | number> {
     'font-family': obj.fontFamily || 'Inter',
     'font-size': obj.fontSize || 24,
     'font-weight': normalizeFontWeight(obj.fontWeight),
-    fill: obj.fill == null ? '#000000' : obj.fill,
+    ...paintAttrs('fill', obj.fill, '#000000'),
     'text-anchor': alignToAnchor(obj.align),
     opacity: obj.opacity == null ? 1 : obj.opacity,
   }
@@ -891,6 +907,8 @@ export class CanvasRenderer {
   toolLayer: SvgEl
   private _artboardEls = new Map<string, SvgEl>()
   private _objectEls = new Map<string, SvgEl>()
+  // <defs> guide paths for text-on-path objects, keyed by text object id.
+  private _textPathDefs = new Map<string, SVGPathElement>()
 
   onObjectMounted: ObjectMountedHook | null = null
   onObjectDragEnd: DragEndHook | null = null
@@ -901,6 +919,10 @@ export class CanvasRenderer {
   // Fired when the node-edit tool commits a reshape (drag of an anchor/handle).
   // Nodes are in the object's local/base frame, ready for store.updatePathNodes.
   onPathNodesChanged: ((id: string, nodes: PathNode[]) => void) | null = null
+  // Whether pressing an object may start an object drag. svg.draggable stops
+  // propagation on press, so when another tool is active (pen, shape builder,
+  // space-pan…) the drag must be vetoed for the stage to receive the press.
+  canDragObjects: () => boolean = () => true
 
   // The currently selected objects (geometry needed to draw handles). Kept in
   // sync by setSelection so handle overlays can be redrawn after any render.
@@ -936,6 +958,20 @@ export class CanvasRenderer {
     // preview). Kept on their own top layer so store re-renders and selection
     // redraws never clear them.
     this.toolLayer = this.draw.group().addClass('tool-layer')
+  }
+
+  // Outline view: a class on the root <svg>; CanvasStage styles it into a
+  // wireframe so no object attributes have to change.
+  setViewMode(mode: 'preview' | 'outline'): void {
+    if (mode === 'outline') this.draw.addClass('outline-mode')
+    else this.draw.removeClass('outline-mode')
+  }
+
+  // The rendered element for an object (null when not rendered). Used by tools
+  // that need the live geometry, e.g. the shape builder's canvas-space paths.
+  getObjectElement(id: string): SVGGraphicsElement | null {
+    const el = this._objectEls.get(id)
+    return el ? (el.node as SVGGraphicsElement) : null
   }
 
   render(snapshot: RenderSnapshot): void {
@@ -1568,6 +1604,43 @@ export class CanvasRenderer {
         this._objectEls.delete(id)
       }
     }
+    for (const [id, def] of this._textPathDefs) {
+      const o = objects[id]
+      if (!o || o.type !== 'text' || !o.pathD) {
+        def.remove()
+        this._textPathDefs.delete(id)
+      }
+    }
+  }
+
+  // Lay text out along its guide path: a <defs> path (in the text's local
+  // frame) referenced by a <textPath> child. Returns false for plain text.
+  private _applyTextPath(obj: RenderObject, el: SvgEl): boolean {
+    if (!obj.pathD) return false
+    const NS = 'http://www.w3.org/2000/svg'
+    const defId = `tp-${obj.id}`
+    let def = this._textPathDefs.get(obj.id)
+    if (!def) {
+      def = document.createElementNS(NS, 'path') as SVGPathElement
+      def.setAttribute('id', defId)
+      ;(this.draw.defs().node as Element).appendChild(def)
+      this._textPathDefs.set(obj.id, def)
+    }
+    def.setAttribute('d', obj.pathD)
+    const node = el.node as SVGTextElement
+    let tp = node.firstElementChild
+    if (!tp || tp.tagName.toLowerCase() !== 'textpath' || node.childNodes.length !== 1) {
+      node.textContent = ''
+      tp = document.createElementNS(NS, 'textPath')
+      node.appendChild(tp)
+    }
+    tp.setAttribute('href', `#${defId}`)
+    tp.setAttribute('startOffset', `${obj.pathOffset ?? 0}%`)
+    if (tp.textContent !== (obj.text || '')) tp.textContent = obj.text || ''
+    // Positioning comes from the path; a baseline x/y would offset the glyphs.
+    node.removeAttribute('x')
+    node.removeAttribute('y')
+    return true
   }
 
   // Post-scale local center of an element's actual geometry, used as the
@@ -1606,6 +1679,10 @@ export class CanvasRenderer {
     }
 
     el.attr(commonAttrs(obj))
+    // Layers panel state: hidden objects don't paint; locked ones ignore the
+    // pointer (so they can't be clicked, dragged or picked by tools).
+    el.attr('display', obj.hidden ? 'none' : null)
+    el.attr('pointer-events', obj.locked ? 'none' : null)
 
     const rot = obj.rotation || 0
     const dispW = obj.width || 0
@@ -1621,7 +1698,8 @@ export class CanvasRenderer {
       const c = this._geometryCenter(el, dispW, dispH, sx, sy)
       el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy, c.cx, c.cy))
     } else if (obj.type === 'text') {
-      el.text(obj.text || '')
+      const onPath = this._applyTextPath(obj, el)
+      if (!onPath) el.text(obj.text || '')
       el.attr(textAttrs(obj))
       // Apply typography as INLINE STYLE, not just presentation attributes.
       // The global reset (`*, *::before, *::after { font-weight: normal }` in
@@ -1638,7 +1716,7 @@ export class CanvasRenderer {
       }
       // Text carries its size via fontSize (no scale distortion); only rotate.
       // Rotate about the glyph bbox center so rotation anchors on the visible text.
-      el.attr({ x: 0, y: obj.fontSize || 24 })
+      if (!onPath) el.attr({ x: 0, y: obj.fontSize || 24 })
       const c = this._geometryCenter(el, dispW, dispH, 1, 1)
       el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, c.cx, c.cy))
     } else if (obj.type === 'image') {
@@ -1682,6 +1760,9 @@ export class CanvasRenderer {
     }
 
     el.draggable()
+    el.on('beforedrag', (e: CustomEvent) => {
+      if (!this.canDragObjects()) e.preventDefault()
+    })
     el.on('dragstart', (e: CustomEvent) => {
       startBox = (e.detail as { box: { x: number; y: number } }).box
       clearGhost()
@@ -1796,6 +1877,41 @@ export class CanvasRenderer {
       .attr({ 'pointer-events': 'none' })
   }
 
+  // Shape Builder overlay: every region outlined (dashed), the hovered one
+  // tinted, and the regions swept by the current drag filled blue (merge) or
+  // red (erase). Paths are canvas-space path data.
+  private _regionsEl: SvgEl | null = null
+  showShapeRegions(regions: { d: string; state: 'idle' | 'hover' | 'merge' | 'erase' }[]): void {
+    this.hideShapeRegions()
+    const vb = this.getViewBox()
+    const strokeW = Math.max(0.5, vb.width / 700)
+    const g = this.toolLayer.group().attr({ 'pointer-events': 'none' })
+    const styles = {
+      idle: { fill: 'none', opacity: 0 },
+      hover: { fill: '#2563eb', opacity: 0.18 },
+      merge: { fill: '#2563eb', opacity: 0.35 },
+      erase: { fill: '#ef4444', opacity: 0.35 },
+    } as const
+    for (const r of regions) {
+      const st = styles[r.state]
+      g.path(r.d)
+        .fill({ color: st.fill === 'none' ? '#000' : st.fill, opacity: st.opacity })
+        .stroke({ color: r.state === 'erase' ? '#ef4444' : '#2563eb', width: strokeW, dasharray: r.state === 'idle' ? `${strokeW * 4} ${strokeW * 3}` : undefined })
+    }
+    this._regionsEl = g
+  }
+
+  hideShapeRegions(): void {
+    if (this._regionsEl) {
+      try {
+        this._regionsEl.remove()
+      } catch {
+        /* noop */
+      }
+      this._regionsEl = null
+    }
+  }
+
   hideShapePreview(): void {
     if (this._previewEl) {
       try {
@@ -1881,6 +1997,7 @@ export class CanvasRenderer {
 
   destroy(): void {
     this.hideMarquee()
+    this.hideShapeRegions()
     this.hideShapePreview()
     this.hidePenPreview()
     try {
@@ -1891,5 +2008,6 @@ export class CanvasRenderer {
     this._artboardEls.clear()
     this._objectEls.clear()
     this._artboardBoxes.clear()
+    this._textPathDefs.clear()
   }
 }

@@ -91,6 +91,17 @@ export function objectSvgMarkup(
   if (obj.type === 'text') {
     // Text carries its size via fontSize (no scale); baseline at y = fontSize.
     const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1)
+    if (obj.pathD) {
+      // Text on a path: the guide path lives in <defs> in the text's local
+      // frame (textPath geometry is read in the referencing text's user space).
+      const pathId = `tp-${obj.id}`
+      const attrs = serializeAttrs({ ...textAttrs(obj), transform })
+      const tp = serializeAttrs({ href: `#${pathId}`, startOffset: `${obj.pathOffset ?? 0}%` })
+      return (
+        `<defs><path${serializeAttrs({ id: pathId, d: obj.pathD })} /></defs>` +
+        `<text${attrs}><textPath${tp}>${escapeXml(obj.text || '')}</textPath></text>`
+      )
+    }
     const attrs = serializeAttrs({
       ...textAttrs(obj),
       x: 0,
@@ -172,7 +183,9 @@ export interface BuildExportSvgResult {
 // are drawn first, then an optional solid background covering the whole viewBox
 // (drawn on top of nothing/behind objects — see ordering below).
 export function buildExportSvg(input: BuildExportSvgInput): BuildExportSvgResult {
-  const { objects, artboards } = input
+  const { artboards } = input
+  // Hidden objects (layers panel eye toggle) are excluded from export.
+  const objects = input.objects.filter((o) => !o.hidden)
   const includeArtboardBackgrounds = input.includeArtboardBackgrounds ?? false
   const background = input.background ?? null
 

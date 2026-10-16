@@ -36,10 +36,13 @@
 
       <section class="pp-section">
         <label class="pp-label">Background</label>
-        <div class="pp-color-row">
-          <input type="color" class="pp-swatch" :value="normalizeColor(artboard.backgroundColor)" @input="setArtboardBackground(val($event))" />
-          <input type="text" class="pp-text-input" :value="artboard.backgroundColor" @change="setArtboardBackground(val($event))" />
-        </div>
+        <ColorPicker
+          :model-value="artboard.backgroundColor"
+          :allow-none="false"
+          :swatches="docColors"
+          @begin="store.snapshot('Edit artboard')"
+          @update:model-value="store.setArtboardBackground(artboard.id, $event)"
+        />
       </section>
 
       <section class="pp-section">
@@ -52,6 +55,42 @@
         >
           Fit artboard to artwork
         </button>
+      </section>
+    </div>
+
+    <!-- Multi-selection: shared paint/opacity + Pathfinder / Shape Builder -->
+    <div v-else-if="!selected && multi.length > 1" class="pp-body">
+      <header class="pp-header">
+        <span class="pp-role">{{ multi.length }} objects</span>
+        <span class="pp-type">selection</span>
+      </header>
+
+      <section v-if="multiPaintable.length" class="pp-section">
+        <label class="pp-label">Fill</label>
+        <ColorPicker
+          :model-value="multiFill"
+          :swatches="docColors"
+          @begin="store.snapshot('Recolor')"
+          @update:model-value="setMultiFill"
+        />
+      </section>
+
+      <section class="pp-section">
+        <label class="pp-label">Opacity <span class="pp-value">{{ Math.round(multiOpacity * 100) }}%</span></label>
+        <input type="range" min="0" max="1" step="0.01" class="pp-range" :value="multiOpacity" @pointerdown="store.snapshot('Opacity')" @input="setMultiOpacity(num($event))" />
+      </section>
+
+      <section v-if="multiPaths.length >= 2" class="pp-section">
+        <label class="pp-label">Pathfinder</label>
+        <div class="pp-pathfinder">
+          <button v-for="op in pathfinderOps" :key="op.id" type="button" class="pp-pf-btn" :title="op.title" :disabled="busy" @click="runPathfinder(op.id)">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" v-html="op.icon" />
+          </button>
+        </div>
+        <button type="button" class="pp-fit-btn pp-mt" title="Shape Builder (Shift+M)" @click="store.setActiveTool('shapeBuilder')">
+          Shape Builder
+        </button>
+        <p v-if="opError" class="pp-error">{{ opError }}</p>
       </section>
     </div>
 
@@ -70,18 +109,12 @@
       <template v-if="selected.type === 'path'">
         <section class="pp-section">
           <label class="pp-label">Fill</label>
-          <div class="pp-color-row">
-            <input type="color" class="pp-swatch" :value="normalizeColor(selected.fill)" @input="setFill(val($event))" />
-            <input type="text" class="pp-text-input" :value="selected.fill" @change="setFill(val($event))" />
-          </div>
+          <ColorPicker :model-value="selected.fill" :swatches="docColors" @begin="store.snapshot('Recolor')" @update:model-value="setFill" />
         </section>
 
         <section class="pp-section">
           <label class="pp-label">Stroke</label>
-          <div class="pp-color-row">
-            <input type="color" class="pp-swatch" :value="normalizeColor(selected.stroke)" @input="setStrokeColor(val($event))" />
-            <input type="text" class="pp-text-input" :value="selected.stroke" @change="setStrokeColor(val($event))" />
-          </div>
+          <ColorPicker :model-value="selected.stroke" :swatches="docColors" @begin="store.snapshot('Recolor')" @update:model-value="setStrokeColor" />
         </section>
 
         <section class="pp-section">
@@ -127,10 +160,13 @@
 
         <section class="pp-section">
           <label class="pp-label">Color</label>
-          <div class="pp-color-row">
-            <input type="color" class="pp-swatch" :value="normalizeColor(selected.fill)" @input="setFill(val($event))" />
-            <input type="text" class="pp-text-input" :value="selected.fill" @change="setFill(val($event))" />
-          </div>
+          <ColorPicker :model-value="selected.fill" :swatches="docColors" @begin="store.snapshot('Recolor')" @update:model-value="setFill" />
+        </section>
+
+        <section v-if="selected.pathD" class="pp-section">
+          <label class="pp-label">Start on path <span class="pp-value">{{ Math.round(selected.pathOffset || 0) }}%</span></label>
+          <input type="range" min="0" max="100" step="0.5" class="pp-range" :value="selected.pathOffset || 0" @pointerdown="store.snapshot('Text path offset')" @input="update({ pathOffset: num($event) })" />
+          <button type="button" class="pp-ghost-btn pp-mt" @click="releaseTextPath">Release from path</button>
         </section>
 
         <section class="pp-section">
@@ -152,6 +188,22 @@
       <!-- Image properties -->
       <template v-else-if="selected.type === 'image'">
         <p v-if="selected.alt" class="pp-alt">{{ selected.alt }}</p>
+
+        <section class="pp-section pp-trace">
+          <label class="pp-label">Image Trace</label>
+          <label class="pp-label pp-sub">Colors <span class="pp-value">{{ trace.colors }}</span></label>
+          <input v-model.number="trace.colors" type="range" min="2" max="16" step="1" class="pp-range" />
+          <label class="pp-label pp-sub">Detail <span class="pp-value">{{ Math.round(trace.detail * 100) }}%</span></label>
+          <input v-model.number="trace.detail" type="range" min="0" max="1" step="0.05" class="pp-range" />
+          <label class="pp-check">
+            <input v-model="trace.removeWhite" type="checkbox" />
+            Remove white background
+          </label>
+          <button type="button" class="pp-fit-btn pp-mt" :disabled="busy" @click="vectorize">
+            {{ busy ? 'Tracing…' : 'Vectorize' }}
+          </button>
+          <p v-if="opError" class="pp-error">{{ opError }}</p>
+        </section>
       </template>
 
       <!-- Transform (shared): size + rotation -->
@@ -176,8 +228,11 @@
 
       <!-- Opacity (shared) -->
       <section class="pp-section">
-        <label class="pp-label">Opacity <span class="pp-value">{{ Math.round(selected.opacity * 100) }}%</span></label>
-        <input type="range" min="0" max="1" step="0.01" class="pp-range" :value="selected.opacity" @input="setOpacity(num($event))" />
+        <label class="pp-label">Opacity</label>
+        <div class="pp-color-row">
+          <input type="range" min="0" max="1" step="0.01" class="pp-range" :value="selected.opacity" @pointerdown="store.snapshot('Opacity')" @input="setOpacity(num($event))" />
+          <input type="number" min="0" max="100" class="pp-number pp-rot-num" :value="Math.round(selected.opacity * 100)" @change="store.snapshot('Opacity'); setOpacity(Math.min(100, Math.max(0, num($event))) / 100)" />
+        </div>
       </section>
 
       <!-- Semantic role (read + editable for demo clarity) -->
@@ -192,7 +247,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
+import ColorPicker from './ColorPicker.vue'
+import { applyPathfinder, type PathfinderOp } from '@/services/canvas/pathBoolean'
+import { vectorizeImageObject, VECTORIZE_DEFAULTS } from '@/services/canvas/vectorize'
+import { isNonePaint, parseColor, toHex } from '@/services/canvas/color'
 import {
   useCanvasStore,
   FONT_FAMILIES,
@@ -209,6 +268,99 @@ const alignments = TEXT_ALIGNMENTS
 const roles = SEMANTIC_ROLES
 
 const selected = computed(() => store.singleSelected)
+const multi = computed(() => store.selectedObjects)
+const multiPaths = computed(() => multi.value.filter((o) => o.type === 'path'))
+const multiPaintable = computed(() => multi.value.filter((o) => o.type !== 'image'))
+const multiFill = computed(() => {
+  const fills = new Set(multiPaintable.value.map((o) => (o as { fill: string }).fill))
+  return fills.size === 1 ? [...fills][0]! : ''
+})
+const multiOpacity = computed(() => {
+  const list = multi.value
+  return list.length ? list.reduce((s, o) => s + (o.opacity ?? 1), 0) / list.length : 1
+})
+
+// Opaque colors already used in the document, offered as quick swatches.
+const docColors = computed(() => {
+  const seen = new Set<string>()
+  const add = (v: unknown) => {
+    if (isNonePaint(v)) return
+    const c = parseColor(v)
+    if (c) seen.add(toHex(c))
+  }
+  for (const o of store.orderedObjects) {
+    if (o.type === 'image') continue
+    add(o.fill)
+    if (o.type === 'path') add(o.stroke)
+  }
+  for (const ab of store.artboards) add(ab.backgroundColor)
+  return [...seen].slice(0, 15)
+})
+
+// Long-running ops (paper.js load, tracing) share one busy flag + error line.
+const busy = ref(false)
+const opError = ref('')
+watch(() => store.selectedIds.join(','), () => (opError.value = ''))
+
+const trace = reactive({
+  colors: VECTORIZE_DEFAULTS.colors,
+  detail: VECTORIZE_DEFAULTS.detail,
+  removeWhite: VECTORIZE_DEFAULTS.removeWhite,
+})
+
+async function vectorize() {
+  const o = selected.value
+  if (!o || o.type !== 'image' || busy.value) return
+  busy.value = true
+  opError.value = ''
+  store.snapshot('Vectorize')
+  try {
+    const ids = await vectorizeImageObject(store, o.id, { ...trace })
+    store.selectObjects(ids)
+  } catch (err) {
+    store.undo()
+    opError.value = (err as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
+const pathfinderOps: { id: PathfinderOp; title: string; icon: string }[] = [
+  { id: 'unite', title: 'Unite', icon: '<path d="M3 3h11v7h7v11H10v-7H3z" fill="currentColor"/>' },
+  { id: 'minusFront', title: 'Minus Front', icon: '<path d="M3 3h11v7h-4v4H3z" fill="currentColor"/><path d="M10.5 10.5h10v10h-10z" fill="none" stroke="currentColor" stroke-dasharray="2 2"/>' },
+  { id: 'intersect', title: 'Intersect', icon: '<path d="M3.5 3.5h10v10h-10zM10.5 10.5h10v10h-10z" fill="none" stroke="currentColor" stroke-dasharray="2 2"/><path d="M10 10h4v4h-4z" fill="currentColor"/>' },
+  { id: 'exclude', title: 'Exclude', icon: '<path d="M3 3h11v7h-4v4H3zM14 10h7v11H10v-7h4z" fill="currentColor"/>' },
+]
+
+async function runPathfinder(op: PathfinderOp) {
+  if (busy.value) return
+  busy.value = true
+  opError.value = ''
+  store.snapshot('Pathfinder')
+  try {
+    const ids = await applyPathfinder(store, multiPaths.value.map((o) => o.id), op)
+    store.selectObjects(ids)
+  } catch (err) {
+    store.undo()
+    opError.value = (err as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
+function setMultiFill(v: string) {
+  for (const o of multiPaintable.value) store.setFill(o.id, v)
+}
+function setMultiOpacity(v: number) {
+  for (const o of multi.value) store.setOpacity(o.id, v)
+}
+
+function releaseTextPath() {
+  const o = selected.value
+  if (!o || o.type !== 'text') return
+  store.snapshot('Release text path')
+  store.updateObject(o.id, { pathD: undefined, pathOffset: undefined })
+}
 const artboard = computed(() => store.selectedArtboard)
 const artboardHasArtwork = computed(() =>
   (artboard.value?.objectIds || []).some((id) => !!store.getObject(id)),
@@ -285,29 +437,16 @@ function updateArtboard(patch: Record<string, unknown>) {
   store.snapshot('Edit artboard')
   store.updateArtboard(artboard.value.id, patch)
 }
-function setArtboardBackground(v: string) {
-  if (!artboard.value) return
-  store.snapshot('Edit artboard')
-  store.setArtboardBackground(artboard.value.id, v)
-}
 function fitArtboardToArtwork() {
   if (!artboard.value || !artboardHasArtwork.value) return
   store.snapshot('Fit artboard to artwork')
   store.fitArtboardToArtwork(artboard.value.id)
 }
-
-function normalizeColor(c: unknown): string {
-  if (typeof c === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c)) return c
-  return '#000000'
-}
 </script>
 
 <style scoped>
 .property-panel {
-  width: 260px;
-  flex-shrink: 0;
   background: #ffffff;
-  border-left: 1px solid #e4e4e7;
   font-family: Inter, sans-serif;
   overflow-y: auto;
   padding: 16px;
@@ -438,6 +577,58 @@ function normalizeColor(c: unknown): string {
 }
 .pp-fit-btn:hover:not(:disabled) {
   background: #2e2559;
+}
+.pp-mt {
+  margin-top: 8px;
+}
+.pp-sub {
+  margin-top: 6px;
+}
+.pp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #3f3f46;
+  margin: 8px 0 2px;
+}
+.pp-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #b91c1c;
+  line-height: 1.4;
+}
+.pp-ghost-btn {
+  width: 100%;
+  padding: 7px 12px;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  color: #211a43;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pp-ghost-btn:hover {
+  background: #f4f4f5;
+}
+.pp-pathfinder {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.pp-pf-btn {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  color: #211a43;
+  cursor: pointer;
+}
+.pp-pf-btn:hover:not(:disabled) {
+  background: #f4f4f5;
 }
 .pp-fit-btn:disabled {
   background: #f4f4f5;

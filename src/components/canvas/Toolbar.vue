@@ -10,6 +10,14 @@
       <span class="tb-sep" />
       <button class="tb-btn" title="Add artboard" @click="addArtboard">Add artboard</button>
       <button class="tb-btn" title="Fit view" @click="emit('fit-view')">Fit view</button>
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn-active': viewMode === 'outline' }"
+        :title="viewMode === 'outline' ? 'Back to Preview (Cmd/Ctrl+Y)' : 'Outline view (Cmd/Ctrl+Y)'"
+        @click="store.toggleViewMode()"
+      >
+        Outline
+      </button>
       <span class="tb-sep" />
       <button class="tb-btn" :disabled="!hasSelection" title="Duplicate (Cmd/Ctrl+D)" @click="duplicate">
         Duplicate
@@ -58,7 +66,7 @@ const emit = defineEmits<{
 defineProps<{ activityOpen?: boolean }>()
 
 const store = useCanvasStore()
-const { selectedIds, history } = storeToRefs(store)
+const { selectedIds, history, viewMode } = storeToRefs(store)
 
 const hasSelection = computed(() => selectedIds.value.length > 0)
 const canUndo = computed(() => history.value.length > 0)
@@ -135,6 +143,11 @@ function sendToBack() {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+}
+.tb-btn {
+  flex-shrink: 0;
 }
 .tb-btn {
   padding: 6px 12px;
@@ -180,5 +193,12 @@ function sendToBack() {
   font-size: 12px;
   color: #71717a;
   min-width: 140px;
+}
+/* The selection hint is the first thing to go on narrow windows. */
+@media (max-width: 1180px) {
+  .tb-hint,
+  .tb-hint + .tb-sep {
+    display: none;
+  }
 }
 </style>

@@ -19,6 +19,7 @@
       @blur="commitInlineEdit"
       @keydown="onInlineKeydown"
     ></textarea>
+    <div v-if="toolHint" class="tool-hint">{{ toolHint }}</div>
   </div>
 </template>
 
@@ -58,13 +59,26 @@ import {
   svgToDataUrl,
   type ClipboardPaste,
 } from '@/services/canvas/pasteTools'
-import { svgToPathObjects } from '@/services/canvas/svgToPaths'
+import { svgToPathObjects, placeImportedPaths } from '@/services/canvas/svgToPaths'
+import {
+  commitShapeBuilder,
+  computeShapeRegions,
+  regionAtPoint,
+  replaceObjects,
+  textPathGeometry,
+  type ShapeRegion,
+} from '@/services/canvas/pathBoolean'
+import type { PathObject } from '@/stores/canvas'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const store = useCanvasStore()
-const { artboards, objects, objectOrder, selectedIds, selectedArtboardId, activeTool } =
+const { artboards, objects, objectOrder, selectedIds, selectedArtboardId, activeTool, viewMode } =
   storeToRefs(store)
+
+// One-line contextual hint shown at the top of the stage for tools that need
+// a precondition (e.g. the shape builder needs overlapping shapes selected).
+const toolHint = ref('')
 
 const mount = ref<HTMLElement | null>(null)
 let renderer: CanvasRenderer | null = null
@@ -315,6 +329,16 @@ function fitBoxToView(box: Box, opts: { paddingRatio?: number; animate?: boolean
 // --- Interaction: object selection wiring ---------------------------------
 function wireObject(obj: RenderObject, el: any) {
   el.node.addEventListener('mousedown', (e: MouseEvent) => {
+    // Type on a path: clicking a path converts it into the guide of a new
+    // text object.
+    if (store.activeTool === 'textPath' && !spacePressed.value) {
+      const target = store.getObject(obj.id)
+      if (target?.type === 'path') {
+        e.stopPropagation()
+        placeTextOnPath(target)
+      }
+      return
+    }
     // The select and node-edit tools select objects on click (not while
     // space-panning). With a creation tool active, let the event bubble to the
     // stage so the tool can draw/place over existing objects.
@@ -393,7 +417,9 @@ function onMouseDown(e: MouseEvent) {
     return
   }
 
-  const wantPan = spacePressed.value || tool === 'image' || tool === 'text'
+  if (tool === 'shapeBuilder' && !spacePressed.value && sbStart(e)) return
+
+  const wantPan = spacePressed.value || tool === 'image' || tool === 'text' || tool === 'textPath' || tool === 'shapeBuilder'
 
   if (!wantPan && (tool === 'select' || isShapeTool(tool))) {
     const p = renderer.screenToCanvas(e.clientX, e.clientY)
@@ -622,6 +648,13 @@ function cancelPen() {
 
 function onStageMouseMove(e: MouseEvent) {
   lastPointer = { clientX: e.clientX, clientY: e.clientY }
+  if (store.activeTool === 'shapeBuilder' && sb.regions && !sb.dragging && renderer) {
+    const hover = regionAtPoint(sb.regions, renderer.screenToCanvas(e.clientX, e.clientY))
+    if (hover !== sb.hover) {
+      sb.hover = hover
+      drawShapeRegions()
+    }
+  }
   // While drawing but between anchors (no button down), show a rubber-band from
   // the last anchor to the cursor.
   if (store.activeTool === 'pen' && penNodes && !penDraft && renderer) {
@@ -634,6 +667,119 @@ function onStageDblClick(e: MouseEvent) {
   if (store.activeTool !== 'pen' || !penNodes) return
   e.preventDefault()
   finishPen(false)
+}
+
+// --- Type on a path ----------------------------------------------------------
+// The clicked path becomes the text's guide (Illustrator converts the path the
+// same way): a text object takes its place in paint order, laid along the
+// path's canvas-space geometry.
+async function placeTextOnPath(path: PathObject) {
+  let geo
+  try {
+    geo = await textPathGeometry(store, path)
+  } catch {
+    return
+  }
+  store.snapshot('Type on path')
+  const [id] = replaceObjects(store, [path.id], [
+    {
+      type: 'text',
+      text: 'Type on a path',
+      pathD: geo.pathD,
+      pathOffset: 0,
+      x: geo.x,
+      y: geo.y,
+      width: geo.width,
+      height: geo.height,
+      fontSize: Math.max(12, Math.round(Math.min(48, Math.max(geo.width, geo.height) / 12))),
+      artboardId: path.artboardId,
+      semanticRole: 'wordmark',
+    },
+  ])
+  store.setActiveTool('select')
+  if (id) store.selectObjects([id])
+}
+
+// --- Shape Builder --------------------------------------------------------------
+// With overlapping paths selected, the union is split into regions. Hover
+// highlights a region; drag across regions to merge them into one shape, or
+// hold Alt while dragging to erase them. Regions not touched stay as separate
+// shapes. The selection is replaced by the result so the user can keep going.
+const sb: {
+  sources: string[]
+  regions: ShapeRegion[] | null
+  hover: number
+  picked: number[]
+  erase: boolean
+  dragging: boolean
+  token: number
+} = { sources: [], regions: null, hover: -1, picked: [], erase: false, dragging: false, token: 0 }
+
+async function prepareShapeBuilder() {
+  const token = ++sb.token
+  sb.regions = null
+  sb.hover = -1
+  sb.picked = []
+  renderer?.hideShapeRegions()
+  if (store.activeTool !== 'shapeBuilder') return
+  const paths = store.selectedObjects.filter((o) => o.type === 'path')
+  if (paths.length < 2) {
+    toolHint.value = 'Shape Builder: select two or more overlapping shapes (V), then switch back (Shift+M).'
+    return
+  }
+  sb.sources = paths.map((o) => o.id)
+  toolHint.value = 'Drag across regions to merge · Alt-drag to erase · Esc to finish'
+  const regions = await computeShapeRegions(store, sb.sources)
+  if (token !== sb.token) return
+  sb.regions = regions
+  drawShapeRegions()
+}
+
+function drawShapeRegions() {
+  if (!renderer || !sb.regions) return
+  const picked = new Set(sb.picked)
+  renderer.showShapeRegions(
+    sb.regions.map((r, i) => ({
+      d: r.pathData,
+      state: picked.has(i) ? (sb.erase ? 'erase' : 'merge') : i === sb.hover ? 'hover' : 'idle',
+    })),
+  )
+}
+
+function sbStart(e: MouseEvent): boolean {
+  if (!renderer || !sb.regions) return false
+  const i = regionAtPoint(sb.regions, renderer.screenToCanvas(e.clientX, e.clientY))
+  if (i < 0) return false
+  sb.dragging = true
+  sb.erase = e.altKey
+  sb.picked = [i]
+  drawShapeRegions()
+  window.addEventListener('mousemove', sbMove)
+  window.addEventListener('mouseup', sbUp)
+  return true
+}
+
+function sbMove(e: MouseEvent) {
+  if (!renderer || !sb.regions) return
+  const i = regionAtPoint(sb.regions, renderer.screenToCanvas(e.clientX, e.clientY))
+  if (e.altKey) sb.erase = true
+  if (i >= 0 && !sb.picked.includes(i)) {
+    sb.picked.push(i)
+    drawShapeRegions()
+  }
+}
+
+function sbUp() {
+  window.removeEventListener('mousemove', sbMove)
+  window.removeEventListener('mouseup', sbUp)
+  sb.dragging = false
+  if (!sb.regions || !sb.picked.length) return
+  const regions = sb.regions
+  const picked = sb.picked
+  store.snapshot(sb.erase ? 'Shape builder erase' : 'Shape builder merge')
+  const ids = commitShapeBuilder(store, sb.sources, regions, picked, sb.erase)
+  // Selecting the result re-runs prepareShapeBuilder via the selection watch.
+  store.selectObjects(ids)
 }
 
 // --- Shape tool: commit a drawn shape to the store ------------------------
@@ -767,50 +913,13 @@ function placeSvgAsPaths(markup: string, point: { x: number; y: number }, label:
   const vb = parsed.viewBox
 
   store.snapshot(label)
-  const ids: string[] = []
-  for (const p of parsed.paths) {
-    // viewBox coords -> placed coords: subtract the viewBox origin, scale, then
-    // offset to the drop origin. Then rebase each path so its own object origin
-    // (x,y) is its geometry's top-left, matching how pen/shape paths are stored.
-    const placed = p.nodes.map((n) => {
-      const map = (x: number, y: number) => ({
-        x: originX + (x - vb.x) * scale,
-        y: originY + (y - vb.y) * scale,
-      })
-      const a = map(n.x, n.y)
-      const out = { x: a.x, y: a.y, inX: undefined as number | undefined, inY: undefined as number | undefined, outX: undefined as number | undefined, outY: undefined as number | undefined }
-      if (n.inX !== undefined && n.inY !== undefined) {
-        const h = map(n.inX, n.inY)
-        out.inX = h.x
-        out.inY = h.y
-      }
-      if (n.outX !== undefined && n.outY !== undefined) {
-        const h = map(n.outX, n.outY)
-        out.outX = h.x
-        out.outY = h.y
-      }
-      return out
-    })
-    const bounds = nodesBounds(placed)
-    const rel = translateNodes(placed, -bounds.x, -bounds.y)
-    const obj = store.addObject({
-      type: 'path',
-      d: nodesToPathData(rel, p.closed, p.subpaths),
-      nodes: rel,
-      closed: p.closed,
-      subpaths: p.subpaths,
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-      fill: p.fill,
-      stroke: p.stroke,
-      strokeWidth: p.strokeWidth * scale,
-      artboardId: artboard?.id ?? null,
-      semanticRole: 'decorative',
-    })
-    ids.push(obj.id)
-  }
+  // viewBox coords -> placed coords: subtract the viewBox origin, scale, then
+  // offset to the drop origin.
+  const ids = placeImportedPaths(store, parsed.paths, {
+    map: (x, y) => ({ x: originX + (x - vb.x) * scale, y: originY + (y - vb.y) * scale }),
+    scale,
+    artboardId: artboard?.id ?? null,
+  })
   store.selectObjects(ids)
   return true
 }
@@ -970,6 +1079,20 @@ function onKeyDown(e: KeyboardEvent) {
     return
   }
 
+  // Cmd/Ctrl+Y toggles Outline / Preview view, as in Illustrator.
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) {
+    e.preventDefault()
+    store.toggleViewMode()
+    return
+  }
+
+  // Shift+M arms the shape builder (Illustrator's shortcut).
+  if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'M' || e.key === 'm')) {
+    e.preventDefault()
+    store.setActiveTool('shapeBuilder')
+    return
+  }
+
   // Single-key tool hotkeys (ignore when a modifier is held, e.g. Cmd+T).
   if (!e.metaKey && !e.ctrlKey && !e.altKey) {
     const toolKeys: Record<string, ToolId> = { v: 'select', t: 'text', p: 'pen', l: 'rect' }
@@ -1016,11 +1139,13 @@ onMounted(() => {
   renderer.onArtboardMounted = wireArtboard
   renderer.onArtboardResized = onArtboardResized
   renderer.onPathNodesChanged = onPathNodesChanged
+  renderer.canDragObjects = () => store.activeTool === 'select' && !spacePressed.value
   // Let the store measure true rendered geometry (e.g. for fit-to-artwork).
   setObjectBoxMeasurer((obj) => (renderer ? renderer.measureObjectBox(obj as any) : null))
   // Let WebMCP tools (which only have the store) drive the viewport.
   setViewportController({ fitBox: (box, o) => fitBoxToView(box, o) })
   renderer.setNodeEditMode(store.activeTool === 'node')
+  renderer.setViewMode(store.viewMode)
   rerender()
   fitViewBox()
   // Text may paint before the Inter web font finishes loading, leaving glyphs
@@ -1041,6 +1166,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', onMouseUp)
   window.removeEventListener('mousemove', onPenDragMove)
   window.removeEventListener('mouseup', onPenDragUp)
+  window.removeEventListener('mousemove', sbMove)
+  window.removeEventListener('mouseup', sbUp)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('paste', handlePaste)
@@ -1065,6 +1192,18 @@ watch(
     if (renderer) {
       renderer.setSelection(store.selectedIds, store.selectedObjects as any)
     }
+  },
+  { deep: true },
+)
+
+watch(viewMode, (mode) => renderer?.setViewMode(mode))
+
+// Shape builder regions follow the selection and any document change (undo,
+// agent edits) while the tool is armed.
+watch(
+  [selectedIds, objects, objectOrder],
+  () => {
+    if (store.activeTool === 'shapeBuilder' && !sb.dragging) prepareShapeBuilder()
   },
   { deep: true },
 )
@@ -1095,6 +1234,9 @@ watch(activeTool, () => {
   penNodes = null
   penDraft = null
   if (renderer) renderer.setNodeEditMode(store.activeTool === 'node')
+  toolHint.value = store.activeTool === 'textPath' ? 'Type on a path: click any path to flow text along it.' : ''
+  // Sets its own hint when the shape builder is armed.
+  prepareShapeBuilder()
 })
 
 // Keep the inline editor aligned while its target text object exists.
@@ -1130,8 +1272,43 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
 .canvas-stage.tool-ellipse,
 .canvas-stage.tool-line,
 .canvas-stage.tool-text,
-.canvas-stage.tool-pen {
+.canvas-stage.tool-pen,
+.canvas-stage.tool-textPath,
+.canvas-stage.tool-shapeBuilder {
   cursor: crosshair;
+}
+/* Type on a path: a path is hittable anywhere inside its shape, not only on
+   a thin stroke (locked objects keep their pointer-events="none"). */
+.canvas-stage.tool-textPath :deep(path.canvas-object:not([pointer-events='none'])) {
+  pointer-events: all;
+}
+.tool-hint {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(33, 26, 67, 0.92);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* Outline view: every object becomes a 1px unfilled wireframe. CSS beats the
+   presentation attributes the renderer sets, so no object data changes. */
+:deep(svg.outline-mode .canvas-object) {
+  fill: none !important;
+  stroke: #18181b !important;
+  stroke-width: 1px !important;
+  stroke-opacity: 1 !important;
+  opacity: 1 !important;
+  vector-effect: non-scaling-stroke;
+}
+:deep(svg.outline-mode image.canvas-object) {
+  opacity: 0.25 !important;
+  filter: grayscale(1);
 }
 .canvas-stage.tool-image {
   cursor: copy;

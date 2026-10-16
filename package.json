@@ -20,6 +20,8 @@
     "@svgdotjs/svg.js": "3.2.4",
     "@svgdotjs/svg.resize.js": "2.0.5",
     "@svgdotjs/svg.select.js": "4.0.1",
+    "imagetracerjs": "^1.2.6",
+    "paper": "^0.12.18",
     "pinia": "3.0.4",
     "svgpath": "^2.6.0",
     "vue": "^3.5.40",
