@@ -26,6 +26,7 @@ function objView(o: CanvasObject | null): Record<string, unknown> | null {
   if (o.name) base.name = o.name
   if (o.hidden) base.hidden = true
   if (o.locked) base.locked = true
+  if (o.type !== 'image' && o.fillGradient) base.fillGradient = o.fillGradient
   if (o.type === 'path') {
     base.fill = o.fill
     base.stroke = o.stroke

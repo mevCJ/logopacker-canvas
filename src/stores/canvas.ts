@@ -4,6 +4,7 @@
 import { defineStore } from 'pinia'
 import { rectPathData, rotatePoint, nodesToPathData, nodesBounds } from '@/services/canvas/svgEngine'
 import type { Box, PathNode } from '@/services/canvas/svgEngine'
+import type { GradientFill } from '@/services/canvas/gradient'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,7 +28,8 @@ export type ObjectType = (typeof OBJECT_TYPES)[number]
 // User-facing canvas tools (the floating tool sidebar). 'select' is the idle
 // default; the others arm a creation mode until the user switches back.
 // 'textPath' types along an existing path; 'shapeBuilder' merges/deletes the
-// overlapping regions of the selected paths.
+// overlapping regions of the selected paths; 'gradient' drags out the
+// direction of a selected object's gradient fill.
 export const TOOL_IDS = [
   'select',
   'node',
@@ -39,6 +41,7 @@ export const TOOL_IDS = [
   'line',
   'image',
   'shapeBuilder',
+  'gradient',
 ] as const
 export type ToolId = (typeof TOOL_IDS)[number]
 
@@ -74,6 +77,9 @@ export type TextAlign = (typeof TEXT_ALIGNMENTS)[number]
 
 // Preview paints objects normally; outline draws every object as a thin
 // unfilled wireframe (Illustrator's Outline view) to inspect construction.
+export const ALIGN_EDGES = ['left', 'hcenter', 'right', 'top', 'vcenter', 'bottom'] as const
+export type AlignEdge = (typeof ALIGN_EDGES)[number]
+
 export const VIEW_MODES = ['preview', 'outline'] as const
 export type ViewMode = (typeof VIEW_MODES)[number]
 
@@ -115,6 +121,8 @@ export interface PathObject extends BaseObject {
   type: 'path'
   d: string
   fill: string
+  // When set, overrides `fill` with a linear/radial gradient.
+  fillGradient?: GradientFill
   stroke: string
   strokeWidth: number
   // Editable Bézier anchors (local/base frame), the source of truth for
@@ -146,6 +154,7 @@ export interface TextObject extends BaseObject {
   fontSize: number
   fontWeight: number
   fill: string
+  fillGradient?: GradientFill
   align: TextAlign | string
   // Text on a path: when set, glyphs flow along this path (in the text's local
   // frame) instead of a straight baseline. `pathOffset` is the start offset
@@ -641,6 +650,71 @@ export const useCanvasStore = defineStore('canvas', {
       return this.reorderObject(id, i + delta)
     },
 
+    // Absolute (canvas-space) axis-aligned bounds of an object as drawn: the
+    // renderer's measured box when available, expanded for rotation.
+    objectCanvasBounds(id: string): Box | null {
+      const o = this.objects[id]
+      if (!o) return null
+      const ab = o.artboardId ? this.getArtboard(o.artboardId) : null
+      const measured = measureObjectBox ? measureObjectBox(o) : null
+      const box = measured ?? {
+        x: (ab?.x ?? 0) + (o.x || 0),
+        y: (ab?.y ?? 0) + (o.y || 0),
+        width: o.width || 0,
+        height: o.height || 0,
+      }
+      if (!o.rotation) return box
+      const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+      const pts = [
+        { x: box.x, y: box.y },
+        { x: box.x + box.width, y: box.y },
+        { x: box.x + box.width, y: box.y + box.height },
+        { x: box.x, y: box.y + box.height },
+      ].map((p) => rotatePoint(center, p, o.rotation))
+      const xs = pts.map((p) => p.x)
+      const ys = pts.map((p) => p.y)
+      return { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }
+    },
+
+    // Align objects' visible bounds to an edge/center of either the union of
+    // the objects (selection) or each object's own artboard. A single object
+    // always aligns to its artboard (Illustrator's "Align to Artboard").
+    alignObjects(ids: string[], edge: AlignEdge, to: 'selection' | 'artboard' = 'selection'): string[] {
+      const items = ids
+        .map((id) => ({ id, b: this.objectCanvasBounds(id) }))
+        .filter((i): i is { id: string; b: Box } => !!i.b)
+      if (!items.length) return []
+      const useArtboard = to === 'artboard' || items.length === 1
+      let union: Box | null = null
+      if (!useArtboard) {
+        const minX = Math.min(...items.map((i) => i.b.x))
+        const minY = Math.min(...items.map((i) => i.b.y))
+        const maxX = Math.max(...items.map((i) => i.b.x + i.b.width))
+        const maxY = Math.max(...items.map((i) => i.b.y + i.b.height))
+        union = { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+      }
+      const moved: string[] = []
+      for (const { id, b } of items) {
+        const o = this.objects[id]!
+        const ab = o.artboardId ? this.getArtboard(o.artboardId) : null
+        const t = union ?? (ab ? { x: ab.x, y: ab.y, width: ab.width, height: ab.height } : null)
+        if (!t) continue
+        let dx = 0
+        let dy = 0
+        if (edge === 'left') dx = t.x - b.x
+        if (edge === 'hcenter') dx = t.x + t.width / 2 - (b.x + b.width / 2)
+        if (edge === 'right') dx = t.x + t.width - (b.x + b.width)
+        if (edge === 'top') dy = t.y - b.y
+        if (edge === 'vcenter') dy = t.y + t.height / 2 - (b.y + b.height / 2)
+        if (edge === 'bottom') dy = t.y + t.height - (b.y + b.height)
+        if (!dx && !dy) continue
+        o.x = (o.x || 0) + dx
+        o.y = (o.y || 0) + dy
+        moved.push(id)
+      }
+      return moved
+    },
+
     // ---- Layer state (layers panel) ----------------------------------------
     // Hiding or locking an object also drops it from the selection, since it
     // can no longer be seen/picked on the canvas.
@@ -756,8 +830,15 @@ export const useCanvasStore = defineStore('canvas', {
     },
 
     // ---- Style helpers -----------------------------------------------------
+    // A solid fill replaces any gradient (as picking a color does in Illustrator).
     setFill(id: string, fill: string): CanvasObject | null {
-      return this.updateObject(id, { fill })
+      return this.updateObject(id, { fill, fillGradient: undefined })
+    },
+    // Set (or clear, with null) an object's gradient fill. Images have none.
+    setFillGradient(id: string, gradient: GradientFill | null): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj || obj.type === 'image') return null
+      return this.updateObject(id, { fillGradient: gradient ? JSON.parse(JSON.stringify(gradient)) : undefined })
     },
     setStroke(
       id: string,

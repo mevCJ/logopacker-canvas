@@ -4,48 +4,58 @@ import { mount } from '@vue/test-utils'
 import ToolSidebar from '@/components/canvas/ToolSidebar.vue'
 import { useCanvasStore } from '@/stores/canvas'
 
+const slot = (wrapper: ReturnType<typeof mount>, group: string) => wrapper.find(`[data-group="${group}"]`)
+
 describe('ToolSidebar', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
 
-  it('arms tools when the top-level buttons are clicked', async () => {
+  it('arms each group slot tool on click', async () => {
     const store = useCanvasStore()
     const wrapper = mount(ToolSidebar)
-    const buttons = wrapper.findAll('.tool-btn')
-    // Order: select, node, text, textPath, pen, shapes, shapeBuilder, image.
-    await buttons[1]!.trigger('click')
-    expect(store.activeTool).toBe('node')
-    await buttons[2]!.trigger('click')
-    expect(store.activeTool).toBe('text')
-    await buttons[3]!.trigger('click')
-    expect(store.activeTool).toBe('textPath')
-    await buttons[4]!.trigger('click')
+    await slot(wrapper, 'pen').trigger('click')
     expect(store.activeTool).toBe('pen')
-    await buttons[6]!.trigger('click')
+    await slot(wrapper, 'type').trigger('click')
+    expect(store.activeTool).toBe('text')
+    await slot(wrapper, 'build').trigger('click')
     expect(store.activeTool).toBe('shapeBuilder')
-    await buttons[0]!.trigger('click')
+    await slot(wrapper, 'gradient').trigger('click')
+    expect(store.activeTool).toBe('gradient')
+    await slot(wrapper, 'selection').trigger('click')
     expect(store.activeTool).toBe('select')
   })
 
-  it('opens the shape flyout and arms each shape tool', async () => {
+  it('opens a group flyout from the caret and remembers the picked tool', async () => {
     const store = useCanvasStore()
     const wrapper = mount(ToolSidebar)
-    const shapesBtn = wrapper.findAll('.tool-btn')[5]!
-    await shapesBtn.trigger('click')
+    await slot(wrapper, 'shape').find('.tool-caret').trigger('click')
     const flyoutBtns = wrapper.findAll('.flyout-btn')
-    expect(flyoutBtns).toHaveLength(3)
-    await flyoutBtns[1]!.trigger('click') // Ellipse
+    expect(flyoutBtns.map((b) => b.attributes('data-tool'))).toEqual(['rect', 'ellipse', 'line'])
+    await flyoutBtns[1]!.trigger('click')
     expect(store.activeTool).toBe('ellipse')
-    // Flyout closes after selection.
     expect(wrapper.findAll('.flyout-btn')).toHaveLength(0)
+    // The slot now arms the ellipse directly.
+    store.setActiveTool('select')
+    await slot(wrapper, 'shape').trigger('click')
+    expect(store.activeTool).toBe('ellipse')
+  })
+
+  it('slot follows tools armed elsewhere (e.g. hotkeys)', async () => {
+    const store = useCanvasStore()
+    const wrapper = mount(ToolSidebar)
+    store.setActiveTool('textPath')
+    await wrapper.vm.$nextTick()
+    expect(slot(wrapper, 'type').classes()).toContain('active')
+    store.setActiveTool('select')
+    await slot(wrapper, 'type').trigger('click')
+    expect(store.activeTool).toBe('textPath')
   })
 
   it('emits open-image-picker when the image tool is chosen', async () => {
     const store = useCanvasStore()
     const wrapper = mount(ToolSidebar)
-    const imageBtn = wrapper.findAll('.tool-btn')[7]!
-    await imageBtn.trigger('click')
+    await slot(wrapper, 'image').trigger('click')
     expect(store.activeTool).toBe('image')
     expect(wrapper.emitted('open-image-picker')).toBeTruthy()
   })

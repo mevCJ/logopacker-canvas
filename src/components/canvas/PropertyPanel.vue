@@ -109,7 +109,7 @@
       <template v-if="selected.type === 'path'">
         <section class="pp-section">
           <label class="pp-label">Fill</label>
-          <ColorPicker :model-value="selected.fill" :swatches="docColors" @begin="store.snapshot('Recolor')" @update:model-value="setFill" />
+          <FillControl :target="selected" :swatches="docColors" />
         </section>
 
         <section class="pp-section">
@@ -160,7 +160,7 @@
 
         <section class="pp-section">
           <label class="pp-label">Color</label>
-          <ColorPicker :model-value="selected.fill" :swatches="docColors" @begin="store.snapshot('Recolor')" @update:model-value="setFill" />
+          <FillControl :target="selected" :swatches="docColors" />
         </section>
 
         <section v-if="selected.pathD" class="pp-section">
@@ -249,9 +249,10 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import ColorPicker from './ColorPicker.vue'
+import FillControl from './FillControl.vue'
 import { applyPathfinder, type PathfinderOp } from '@/services/canvas/pathBoolean'
 import { vectorizeImageObject, VECTORIZE_DEFAULTS } from '@/services/canvas/vectorize'
-import { isNonePaint, parseColor, toHex } from '@/services/canvas/color'
+import { documentColors } from '@/services/canvas/documentColors'
 import {
   useCanvasStore,
   FONT_FAMILIES,
@@ -280,22 +281,7 @@ const multiOpacity = computed(() => {
   return list.length ? list.reduce((s, o) => s + (o.opacity ?? 1), 0) / list.length : 1
 })
 
-// Opaque colors already used in the document, offered as quick swatches.
-const docColors = computed(() => {
-  const seen = new Set<string>()
-  const add = (v: unknown) => {
-    if (isNonePaint(v)) return
-    const c = parseColor(v)
-    if (c) seen.add(toHex(c))
-  }
-  for (const o of store.orderedObjects) {
-    if (o.type === 'image') continue
-    add(o.fill)
-    if (o.type === 'path') add(o.stroke)
-  }
-  for (const ab of store.artboards) add(ab.backgroundColor)
-  return [...seen].slice(0, 15)
-})
+const docColors = computed(() => documentColors(store))
 
 // Long-running ops (paper.js load, tracing) share one busy flag + error line.
 const busy = ref(false)

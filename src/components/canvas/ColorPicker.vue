@@ -84,12 +84,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { formatColor, hsvToRgb, isNonePaint, parseColor, rgbToHsv, toHex, type Hsv } from '@/services/canvas/color'
 
 const props = withDefaults(
-  defineProps<{ modelValue: string; allowNone?: boolean; swatches?: string[] }>(),
-  { allowNone: true, swatches: () => [] },
+  defineProps<{ modelValue: string; allowNone?: boolean; swatches?: string[]; defaultOpen?: boolean }>(),
+  { allowNone: true, swatches: () => [], defaultOpen: false },
 )
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
@@ -98,7 +98,7 @@ const emit = defineEmits<{
 }>()
 
 const WHEEL = 168
-const open = ref(false)
+const open = ref(props.defaultOpen)
 const wheel = ref<HTMLCanvasElement | null>(null)
 
 // HSV is kept locally so hue/saturation survive passing through black/grey
@@ -108,6 +108,10 @@ const alpha = ref(1)
 let lastEmitted: string | null = null
 
 // An empty value means a multi-selection with differing paints ("Mixed").
+onMounted(() => {
+  if (open.value) drawWheel()
+})
+
 const isNone = computed(() => props.modelValue !== '' && isNonePaint(props.modelValue))
 
 function syncFromValue(value: string) {

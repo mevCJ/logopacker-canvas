@@ -69,6 +69,7 @@ import {
   type ShapeRegion,
 } from '@/services/canvas/pathBoolean'
 import type { PathObject } from '@/stores/canvas'
+import { defaultGradient } from '@/services/canvas/gradient'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -331,6 +332,12 @@ function wireObject(obj: RenderObject, el: any) {
   el.node.addEventListener('mousedown', (e: MouseEvent) => {
     // Type on a path: clicking a path converts it into the guide of a new
     // text object.
+    // Gradient tool: pressing an unselected object selects it, then the press
+    // continues to the stage, which starts the gradient drag.
+    if (store.activeTool === 'gradient' && !spacePressed.value) {
+      if (!store.selectedIds.includes(obj.id)) store.selectObjects([obj.id])
+      return
+    }
     if (store.activeTool === 'textPath' && !spacePressed.value) {
       const target = store.getObject(obj.id)
       if (target?.type === 'path') {
@@ -418,8 +425,15 @@ function onMouseDown(e: MouseEvent) {
   }
 
   if (tool === 'shapeBuilder' && !spacePressed.value && sbStart(e)) return
+  if (tool === 'gradient' && !spacePressed.value && gradStart(e)) return
 
-  const wantPan = spacePressed.value || tool === 'image' || tool === 'text' || tool === 'textPath' || tool === 'shapeBuilder'
+  const wantPan =
+    spacePressed.value ||
+    tool === 'image' ||
+    tool === 'text' ||
+    tool === 'textPath' ||
+    tool === 'shapeBuilder' ||
+    tool === 'gradient'
 
   if (!wantPan && (tool === 'select' || isShapeTool(tool))) {
     const p = renderer.screenToCanvas(e.clientX, e.clientY)
@@ -537,7 +551,8 @@ function handleEmptyClick(e: MouseEvent) {
 // --- Pen tool: Bézier path builder ---------------------------------------
 // Click for a corner anchor; press-drag to pull symmetric tangent handles for
 // a smooth anchor. Close by clicking near the first anchor; finish an open path
-// with double-click / Enter; cancel with Escape.
+// with double-click / Enter / Escape, or by switching tools (the path is kept,
+// as in Illustrator).
 function penDistanceThreshold(): number {
   // Convert the screen-pixel close radius to canvas units at current zoom.
   if (!renderer || !mount.value) return PEN_CLOSE_PX
@@ -638,12 +653,6 @@ function finishPen(closed: boolean) {
   const obj = store.addObject({ ...payload, artboardId: artboard?.id ?? null })
   store.selectObjects([obj.id])
   // Tool stays armed for drawing multiple paths.
-}
-
-function cancelPen() {
-  penNodes = null
-  penDraft = null
-  if (renderer) renderer.hidePenPreview()
 }
 
 function onStageMouseMove(e: MouseEvent) {
@@ -772,6 +781,8 @@ function sbMove(e: MouseEvent) {
 function sbUp() {
   window.removeEventListener('mousemove', sbMove)
   window.removeEventListener('mouseup', sbUp)
+  window.removeEventListener('mousemove', gradMove)
+  window.removeEventListener('mouseup', gradUp)
   sb.dragging = false
   if (!sb.regions || !sb.picked.length) return
   const regions = sb.regions
@@ -780,6 +791,77 @@ function sbUp() {
   const ids = commitShapeBuilder(store, sb.sources, regions, picked, sb.erase)
   // Selecting the result re-runs prepareShapeBuilder via the selection watch.
   store.selectObjects(ids)
+}
+
+// --- Gradient tool ---------------------------------------------------------------
+// Drag across the selection to set the gradient's start and end (Illustrator's
+// Gradient tool). Objects without a gradient get a default one from their fill.
+// A plain click just applies a gradient. The vector is stored in each object's
+// bounding-box fractions, so the drag maps per object through its transform.
+let gradDrag: { start: { x: number; y: number }; end: { x: number; y: number }; moved: boolean } | null = null
+
+function gradientTargets() {
+  return store.selectedObjects.filter((o) => o.type !== 'image')
+}
+
+function drawGradientAnnotator() {
+  if (!renderer) return
+  renderer.hideGradientAnnotator()
+  if (store.activeTool !== 'gradient') return
+  if (gradDrag) {
+    renderer.showGradientAnnotator(gradDrag.start, gradDrag.end)
+    return
+  }
+  const targets = gradientTargets()
+  const o = targets.length === 1 ? targets[0]! : null
+  const g = o && (o.type === 'path' || o.type === 'text') ? o.fillGradient : undefined
+  if (!o || !g) return
+  const a = renderer.objectFractionToCanvas(o as any, { x: g.x1, y: g.y1 })
+  const b = renderer.objectFractionToCanvas(o as any, { x: g.x2, y: g.y2 })
+  if (a && b) renderer.showGradientAnnotator(a, b)
+}
+
+function gradStart(e: MouseEvent): boolean {
+  if (!renderer || !gradientTargets().length) return false
+  const p = renderer.screenToCanvas(e.clientX, e.clientY)
+  gradDrag = { start: p, end: p, moved: false }
+  window.addEventListener('mousemove', gradMove)
+  window.addEventListener('mouseup', gradUp)
+  return true
+}
+
+function gradMove(e: MouseEvent) {
+  if (!renderer || !gradDrag) return
+  gradDrag.end = renderer.screenToCanvas(e.clientX, e.clientY)
+  const vb = renderer.getViewBox()
+  if (Math.hypot(gradDrag.end.x - gradDrag.start.x, gradDrag.end.y - gradDrag.start.y) > vb.width / 300) {
+    gradDrag.moved = true
+  }
+  drawGradientAnnotator()
+}
+
+function gradUp() {
+  window.removeEventListener('mousemove', gradMove)
+  window.removeEventListener('mouseup', gradUp)
+  const drag = gradDrag
+  gradDrag = null
+  if (!renderer || !drag) return
+  const targets = gradientTargets()
+  if (!targets.length) return drawGradientAnnotator()
+  store.snapshot('Gradient')
+  for (const o of targets) {
+    const base = o.fillGradient ?? defaultGradient(o.fill)
+    if (!drag.moved) {
+      if (!o.fillGradient) store.setFillGradient(o.id, base)
+      continue
+    }
+    const a = renderer.canvasToObjectFraction(o as any, drag.start)
+    const b = renderer.canvasToObjectFraction(o as any, drag.end)
+    if (!a || !b) continue
+    const r = (n: number) => Math.round(n * 1000) / 1000
+    store.setFillGradient(o.id, { ...base, x1: r(a.x), y1: r(a.y), x2: r(b.x), y2: r(b.y) })
+  }
+  // The store watch redraws the annotator once the new gradient renders.
 }
 
 // --- Shape tool: commit a drawn shape to the store ------------------------
@@ -1057,17 +1139,12 @@ function onKeyDown(e: KeyboardEvent) {
     return
   }
 
-  // Pen: Enter finishes an open path; Escape cancels an in-progress path
-  // (without leaving the tool) so the user can start over.
+  // Pen: Enter or Escape ends the in-progress path, keeping it (without
+  // leaving the tool) so the next click starts a new path.
   if (store.activeTool === 'pen' && penNodes) {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' || e.key === 'Escape') {
       e.preventDefault()
       finishPen(false)
-      return
-    }
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      cancelPen()
       return
     }
   }
@@ -1095,7 +1172,17 @@ function onKeyDown(e: KeyboardEvent) {
 
   // Single-key tool hotkeys (ignore when a modifier is held, e.g. Cmd+T).
   if (!e.metaKey && !e.ctrlKey && !e.altKey) {
-    const toolKeys: Record<string, ToolId> = { v: 'select', t: 'text', p: 'pen', l: 'rect' }
+    // Illustrator's single-key tool shortcuts.
+    const toolKeys: Record<string, ToolId> = {
+      v: 'select',
+      a: 'node',
+      t: 'text',
+      p: 'pen',
+      m: 'rect',
+      l: 'ellipse',
+      '\\': 'line',
+      g: 'gradient',
+    }
     const tool = toolKeys[e.key.toLowerCase()]
     if (tool) {
       e.preventDefault()
@@ -1204,6 +1291,8 @@ watch(
   [selectedIds, objects, objectOrder],
   () => {
     if (store.activeTool === 'shapeBuilder' && !sb.dragging) prepareShapeBuilder()
+    // After the renderer has applied the change (render runs in an earlier watch).
+    if (store.activeTool === 'gradient') nextTick(drawGradientAnnotator)
   },
   { deep: true },
 )
@@ -1225,6 +1314,8 @@ watch(
 // Clean up transient tool state whenever the active tool changes.
 watch(activeTool, () => {
   if (inlineEdit.value) commitInlineEdit()
+  // Switching away mid-path keeps what was drawn (finishPen ignores < 2 anchors).
+  if (penNodes) finishPen(false)
   if (renderer) {
     renderer.hideMarquee()
     renderer.hideShapePreview()
@@ -1234,7 +1325,14 @@ watch(activeTool, () => {
   penNodes = null
   penDraft = null
   if (renderer) renderer.setNodeEditMode(store.activeTool === 'node')
-  toolHint.value = store.activeTool === 'textPath' ? 'Type on a path: click any path to flow text along it.' : ''
+  toolHint.value =
+    store.activeTool === 'textPath'
+      ? 'Type on a path: click any path to flow text along it.'
+      : store.activeTool === 'gradient'
+        ? 'Gradient: drag across a selected shape or text to set its direction · click to apply'
+        : ''
+  gradDrag = null
+  drawGradientAnnotator()
   // Sets its own hint when the shape builder is armed.
   prepareShapeBuilder()
 })
@@ -1274,7 +1372,8 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
 .canvas-stage.tool-text,
 .canvas-stage.tool-pen,
 .canvas-stage.tool-textPath,
-.canvas-stage.tool-shapeBuilder {
+.canvas-stage.tool-shapeBuilder,
+.canvas-stage.tool-gradient {
   cursor: crosshair;
 }
 /* Type on a path: a path is hittable anywhere inside its shape, not only on

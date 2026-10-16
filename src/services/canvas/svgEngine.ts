@@ -10,6 +10,7 @@
 import { SVG } from '@svgdotjs/svg.js'
 import '@svgdotjs/svg.draggable.js'
 import { splitPaint } from './color'
+import { gradientId, gradientMarkup, type GradientFill } from './gradient'
 
 export interface Box {
   x: number
@@ -49,6 +50,7 @@ export interface RenderObject {
   href?: string
   pathD?: string
   pathOffset?: number
+  fillGradient?: GradientFill
   name?: string
   hidden?: boolean
   locked?: boolean
@@ -118,10 +120,16 @@ function paintAttrs(kind: 'fill' | 'stroke', value: string | null | undefined, f
   return { [kind]: opacity < 1 ? color : value, [`${kind}-opacity`]: opacity }
 }
 
+// Fill attrs, pointing at the object's <defs> gradient when it has one.
+function fillAttrs(obj: RenderObject, fallback: string) {
+  if (obj.fillGradient) return { fill: `url(#${gradientId(obj.id)})`, 'fill-opacity': 1 }
+  return paintAttrs('fill', obj.fill, fallback)
+}
+
 export function pathAttrs(obj: RenderObject): Record<string, string | number> {
   return {
     d: obj.d || '',
-    ...paintAttrs('fill', obj.fill, 'none'),
+    ...fillAttrs(obj, 'none'),
     ...paintAttrs('stroke', obj.stroke, 'none'),
     'stroke-width': obj.strokeWidth || 0,
     opacity: obj.opacity == null ? 1 : obj.opacity,
@@ -148,7 +156,7 @@ export function textAttrs(obj: RenderObject): Record<string, string | number> {
     'font-family': obj.fontFamily || 'Inter',
     'font-size': obj.fontSize || 24,
     'font-weight': normalizeFontWeight(obj.fontWeight),
-    ...paintAttrs('fill', obj.fill, '#000000'),
+    ...fillAttrs(obj, '#000000'),
     'text-anchor': alignToAnchor(obj.align),
     opacity: obj.opacity == null ? 1 : obj.opacity,
   }
@@ -909,6 +917,9 @@ export class CanvasRenderer {
   private _objectEls = new Map<string, SvgEl>()
   // <defs> guide paths for text-on-path objects, keyed by text object id.
   private _textPathDefs = new Map<string, SVGPathElement>()
+  // <defs> gradients keyed by object id, with the markup they were built from
+  // so unchanged gradients aren't rebuilt on every render.
+  private _gradientDefs = new Map<string, { el: Element; markup: string }>()
 
   onObjectMounted: ObjectMountedHook | null = null
   onObjectDragEnd: DragEndHook | null = null
@@ -1145,6 +1156,66 @@ export class CanvasRenderer {
   // center, translate to the object's absolute origin. Using the same math as
   // rendering (rather than the browser's getCTM) keeps the node overlay glued
   // to the shape regardless of engine CTM quirks.
+  // Map a canvas point into an object's geometry box as 0..1 fractions (the
+  // objectBoundingBox space gradients use), and back. Rotation/scale aware.
+  private _bboxFrame(obj: RenderObject): { t: ObjectTransformParams; b: Box } | null {
+    const el = this._objectEls.get(obj.id)
+    if (!el) return null
+    let b: Box
+    try {
+      b = el.bbox()
+    } catch {
+      return null
+    }
+    if (!b.width || !b.height) return null
+    const t = this._objectTransformParams(obj)
+    // Text carries its size in fontSize and is never scaled (see _renderObject).
+    if (obj.type === 'text') {
+      t.scaleX = 1
+      t.scaleY = 1
+    }
+    return { t, b }
+  }
+
+  canvasToObjectFraction(obj: RenderObject, p: { x: number; y: number }): { x: number; y: number } | null {
+    const f = this._bboxFrame(obj)
+    if (!f) return null
+    const local = canvasPointToNode(p, f.t)
+    return { x: (local.x - f.b.x) / f.b.width, y: (local.y - f.b.y) / f.b.height }
+  }
+
+  objectFractionToCanvas(obj: RenderObject, fr: { x: number; y: number }): { x: number; y: number } | null {
+    const f = this._bboxFrame(obj)
+    if (!f) return null
+    return nodePointToCanvas({ x: f.b.x + fr.x * f.b.width, y: f.b.y + fr.y * f.b.height }, f.t)
+  }
+
+  // Gradient annotator: the gradient vector drawn over its object, a circle at
+  // the start and a square at the end (Illustrator's gradient annotator).
+  private _gradientEl: SvgEl | null = null
+  showGradientAnnotator(start: { x: number; y: number }, end: { x: number; y: number }): void {
+    this.hideGradientAnnotator()
+    const vb = this.getViewBox()
+    const w = Math.max(0.5, vb.width / 600)
+    const g = this.toolLayer.group().attr({ 'pointer-events': 'none' })
+    g.line(start.x, start.y, end.x, end.y).stroke({ color: '#ffffff', width: w * 3, linecap: 'round' })
+    g.line(start.x, start.y, end.x, end.y).stroke({ color: '#211A43', width: w, linecap: 'round' })
+    g.circle(w * 9).center(start.x, start.y).fill('#ffffff').stroke({ color: '#211A43', width: w })
+    g.rect(w * 8, w * 8).center(end.x, end.y).fill('#211A43').stroke({ color: '#ffffff', width: w })
+    this._gradientEl = g
+  }
+
+  hideGradientAnnotator(): void {
+    if (this._gradientEl) {
+      try {
+        this._gradientEl.remove()
+      } catch {
+        /* noop */
+      }
+      this._gradientEl = null
+    }
+  }
+
   private _objectTransformParams(obj: RenderObject): ObjectTransformParams {
     const ab = obj.artboardId ? this._artboardBoxes.get(obj.artboardId) : null
     const absX = (ab ? ab.x : 0) + (obj.x || 0)
@@ -1604,6 +1675,13 @@ export class CanvasRenderer {
         this._objectEls.delete(id)
       }
     }
+    for (const [id, def] of this._gradientDefs) {
+      const o = objects[id]
+      if (!o || !o.fillGradient) {
+        def.el.remove()
+        this._gradientDefs.delete(id)
+      }
+    }
     for (const [id, def] of this._textPathDefs) {
       const o = objects[id]
       if (!o || o.type !== 'text' || !o.pathD) {
@@ -1611,6 +1689,23 @@ export class CanvasRenderer {
         this._textPathDefs.delete(id)
       }
     }
+  }
+
+  // Create/refresh the <defs> gradient an object's fill points at.
+  private _applyGradient(obj: RenderObject): void {
+    if (!obj.fillGradient) return
+    const markup = gradientMarkup(gradientId(obj.id), obj.fillGradient)
+    const cached = this._gradientDefs.get(obj.id)
+    if (cached && cached.markup === markup) return
+    const NS = 'http://www.w3.org/2000/svg'
+    const holder = document.createElementNS(NS, 'svg')
+    holder.innerHTML = markup
+    const el = holder.firstElementChild
+    if (!el) return
+    const defs = this.draw.defs().node as Element
+    if (cached) cached.el.replaceWith(el)
+    else defs.appendChild(el)
+    this._gradientDefs.set(obj.id, { el, markup })
   }
 
   // Lay text out along its guide path: a <defs> path (in the text's local
@@ -1679,6 +1774,7 @@ export class CanvasRenderer {
     }
 
     el.attr(commonAttrs(obj))
+    this._applyGradient(obj)
     // Layers panel state: hidden objects don't paint; locked ones ignore the
     // pointer (so they can't be clicked, dragged or picked by tools).
     el.attr('display', obj.hidden ? 'none' : null)
@@ -1997,6 +2093,7 @@ export class CanvasRenderer {
 
   destroy(): void {
     this.hideMarquee()
+    this.hideGradientAnnotator()
     this.hideShapeRegions()
     this.hideShapePreview()
     this.hidePenPreview()
@@ -2009,5 +2106,6 @@ export class CanvasRenderer {
     this._objectEls.clear()
     this._artboardBoxes.clear()
     this._textPathDefs.clear()
+    this._gradientDefs.clear()
   }
 }

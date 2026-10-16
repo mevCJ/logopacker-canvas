@@ -59,7 +59,7 @@
 
             <span class="ly-thumb">
               <svg v-if="o.type === 'path'" :viewBox="thumbViewBox(o)" width="18" height="18" aria-hidden="true">
-                <path :d="o.d" :fill="thumbPaint(o.fill)" :stroke="thumbPaint(o.stroke)" :stroke-width="o.strokeWidth || 0" />
+                <path :d="o.d" :fill="o.fillGradient ? `url(#grad-${o.id})` : thumbPaint(o.fill)" :stroke="thumbPaint(o.stroke)" :stroke-width="o.strokeWidth || 0" />
               </svg>
               <span v-else-if="o.type === 'text'" class="ly-thumb-t">T</span>
               <img v-else-if="o.type === 'image' && o.href" :src="o.href" alt="" />

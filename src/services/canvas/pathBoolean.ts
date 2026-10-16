@@ -118,6 +118,7 @@ export function splitIntoPieces(scope: paper.PaperScope, item: PathItem): PathIt
 // Style carried from a source object onto a boolean result.
 export interface PathStyle {
   fill: string
+  fillGradient?: PathObject['fillGradient']
   stroke: string
   strokeWidth: number
   opacity: number
@@ -131,6 +132,7 @@ export function styleOf(obj: PathObject): PathStyle {
   const sy = obj.baseHeight ? obj.height / obj.baseHeight : 1
   return {
     fill: obj.fill,
+    fillGradient: obj.fillGradient,
     stroke: obj.stroke,
     strokeWidth: (obj.strokeWidth || 0) * Math.sqrt(Math.abs(sx * sy)),
     opacity: obj.opacity ?? 1,
@@ -163,6 +165,7 @@ export function itemToPayload(store: CanvasStore, item: PathItem, style: PathSty
     baseHeight: b.height,
     rotation: 0,
     fill: style.fill,
+    fillGradient: style.fillGradient ? JSON.parse(JSON.stringify(style.fillGradient)) : undefined,
     stroke: style.stroke,
     strokeWidth: style.strokeWidth,
     opacity: style.opacity,

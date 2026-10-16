@@ -14,6 +14,7 @@ import {
   type PathfinderOp,
 } from './pathBoolean'
 import { vectorizeImageObject, VECTORIZE_DEFAULTS } from './vectorize'
+import { normalizeGradient, withAngle } from './gradient'
 
 export function buildDesignTools(
   store: CanvasStore,
@@ -187,6 +188,60 @@ export function buildDesignTools(
         } catch (err) {
           return fail('Shape builder', err)
         }
+      },
+    },
+    {
+      name: 'set_gradient_fill',
+      description:
+        'Gives paths/text a linear or radial gradient fill (replacing the solid fill), or removes it with clear=true. Stops are {offset 0-1, color (hex or rgba)}. Linear direction via angle in degrees (0 = left→right, 90 = top→bottom) or explicit x1,y1,x2,y2 in 0-1 bounding-box fractions; radial is centered on x1,y1 with radius to x2,y2.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ids: { type: 'array', items: { type: 'string' } },
+          type: { type: 'string', enum: ['linear', 'radial'] },
+          stops: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { offset: { type: 'number' }, color: { type: 'string' } },
+              required: ['offset', 'color'],
+            },
+          },
+          angle: { type: 'number' },
+          x1: { type: 'number' },
+          y1: { type: 'number' },
+          x2: { type: 'number' },
+          y2: { type: 'number' },
+          clear: { type: 'boolean' },
+        },
+        required: ['ids'],
+      },
+      execute(input: {
+        ids: string[]
+        type?: 'linear' | 'radial'
+        stops?: { offset: number; color: string }[]
+        angle?: number
+        x1?: number
+        y1?: number
+        x2?: number
+        y2?: number
+        clear?: boolean
+      }) {
+        const targets = input.ids.map((id) => store.getObject(id)).filter((o) => !!o && o.type !== 'image')
+        if (!targets.length) return text({ error: 'No path or text objects among ids.' })
+        if (input.clear) {
+          store.snapshot('Remove gradient')
+          targets.forEach((o) => store.setFillGradient(o!.id, null))
+          log(`Removed gradient from ${targets.length} object(s)`)
+          return text({ updated: targets.map((o) => o!.id) })
+        }
+        let g = normalizeGradient({ ...input, type: input.type ?? 'linear' })
+        if (!g) return text({ error: 'Need at least two valid stops ({offset, color}).' })
+        if (g.type === 'linear' && typeof input.angle === 'number') g = withAngle(g, input.angle)
+        store.snapshot('Gradient')
+        targets.forEach((o) => store.setFillGradient(o!.id, g))
+        log(`Applied ${g.type} gradient to ${targets.length} object(s)`)
+        return text({ updated: targets.map((o) => o!.id), gradient: g })
       },
     },
     {

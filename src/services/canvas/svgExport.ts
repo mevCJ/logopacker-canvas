@@ -14,6 +14,7 @@ import {
   type Box,
   type RenderObject,
 } from './svgEngine'
+import { gradientId, gradientMarkup } from './gradient'
 
 // Loose artboard shape (a subset of the store's Artboard) needed for export.
 export interface ExportArtboard {
@@ -231,6 +232,9 @@ export function buildExportSvg(input: BuildExportSvgInput): BuildExportSvgResult
 
   for (const obj of objects) {
     const ab = obj.artboardId ? abById.get(obj.artboardId) : null
+    if (obj.fillGradient && obj.type !== 'image') {
+      parts.push(`<defs>${gradientMarkup(gradientId(obj.id), obj.fillGradient)}</defs>`)
+    }
     parts.push(objectSvgMarkup(obj, ab ?? null))
   }
 
