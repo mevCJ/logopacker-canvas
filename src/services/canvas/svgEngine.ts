@@ -35,6 +35,10 @@ export interface RenderObject {
   baseWidth?: number
   baseHeight?: number
   rotation?: number
+  // Mirrored on its own axis (text and images; paths bake reflection into
+  // their geometry).
+  flipX?: boolean
+  flipY?: boolean
   opacity?: number
   d?: string
   shape?: string
@@ -683,11 +687,22 @@ export function objectTransform(
   scaleY = 1,
   cx = displayWidth / 2,
   cy = displayHeight / 2,
+  flip: { x?: boolean; y?: boolean } = {},
 ): string {
   const parts = [`translate(${absX} ${absY})`]
   if (rotationDeg) parts.push(`rotate(${rotationDeg} ${cx} ${cy})`)
+  // A mirror about the same pivot, inside the rotation (a reflected object
+  // flips on its own axes).
+  if (flip.x || flip.y) {
+    parts.push(`translate(${cx} ${cy}) scale(${flip.x ? -1 : 1} ${flip.y ? -1 : 1}) translate(${-cx} ${-cy})`)
+  }
   if (scaleX !== 1 || scaleY !== 1) parts.push(`scale(${scaleX} ${scaleY})`)
   return parts.join(' ')
+}
+
+// The mirror flags an object renders with.
+export function objectFlip(obj: { flipX?: boolean; flipY?: boolean }): { x?: boolean; y?: boolean } {
+  return { x: !!obj.flipX, y: !!obj.flipY }
 }
 
 // The affine transform a path/image object applies to its local geometry,
@@ -2224,7 +2239,7 @@ export class CanvasRenderer {
             const c = this._geometryCenter(objEl, dispW, dispH, sx, sy)
             objEl.attr(
               'transform',
-              objectTransform(ax + (obj.x || 0), ay + (obj.y || 0), dispW, dispH, deg, sx, sy, c.cx, c.cy),
+              objectTransform(ax + (obj.x || 0), ay + (obj.y || 0), dispW, dispH, deg, sx, sy, c.cx, c.cy, objectFlip(obj)),
             )
           }
           this._selectedObjects = this._selectedObjects.map((o) =>
@@ -2592,13 +2607,13 @@ export class CanvasRenderer {
       if (!onPath && !isArea) el.attr({ x: 0, y: obj.fontSize || 24 })
       // Area type rotates about its box center; others about their glyphs.
       const c = isArea ? { cx: dispW / 2, cy: dispH / 2 } : this._geometryCenter(el, dispW, dispH, 1, 1)
-      el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, c.cx, c.cy))
+      el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, c.cx, c.cy, objectFlip(obj)))
     } else if (obj.type === 'image') {
       el.attr(imageAttrs(obj))
       el.attr({ x: 0, y: 0 })
       const sx = axisScale(dispW, obj.baseWidth)
       const sy = axisScale(dispH, obj.baseHeight)
-      el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy))
+      el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy, dispW / 2, dispH / 2, objectFlip(obj)))
     }
 
     if (isNew) {

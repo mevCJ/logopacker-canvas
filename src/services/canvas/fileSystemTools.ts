@@ -98,7 +98,7 @@ export function buildFileSystemTools(
   function snapshot(): ExportStateSnapshot {
     return {
       artboards: JSON.parse(JSON.stringify(store.artboards)),
-      objects: JSON.parse(JSON.stringify(store.objects)) as Record<string, RenderObject>,
+      objects: store.renderObjects() as Record<string, RenderObject>,
       objectOrder: [...store.objectOrder],
       selectedIds: [...store.selectedIds],
       selectedArtboardId: store.selectedArtboardId,

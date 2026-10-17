@@ -90,7 +90,7 @@ import { isNonePaint } from '@/services/canvas/color'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const store = useCanvasStore()
-const { artboards, objects, objectOrder, selectedIds, selectedArtboardId, activeTool, viewMode } =
+const { artboards, objects, objectOrder, layers, selectedIds, selectedArtboardId, activeTool, viewMode } =
   storeToRefs(store)
 
 // One-line contextual hint shown at the top of the stage for tools that need
@@ -217,7 +217,7 @@ function fitInlineSize() {
 
 function startInlineEdit(id: string, isNew = false) {
   const obj = store.getObject(id)
-  if (!obj || obj.type !== 'text' || obj.locked) return
+  if (!obj || obj.type !== 'text' || store.isLocked(obj)) return
   if (inlineEdit.value && inlineEdit.value.id !== id) commitInlineEdit()
   store.selectObjects([id])
   inlineEdit.value = { id, value: obj.text || '', isNew }
@@ -279,7 +279,8 @@ function onInlineKeydown(e: KeyboardEvent) {
 function snapshot() {
   return {
     artboards: JSON.parse(JSON.stringify(store.artboards)),
-    objects: JSON.parse(JSON.stringify(store.objects)),
+    // Layer visibility and lock applied.
+    objects: store.renderObjects(),
     objectOrder: [...store.objectOrder],
   }
 }
@@ -444,7 +445,7 @@ function wireObject(obj: RenderObject, el: any) {
     const tool = store.activeTool
     if ((tool !== 'node' && tool !== 'pen') || spacePressed.value) return
     const o = store.getObject(obj.id)
-    if (!o || o.type !== 'path' || o.locked) return
+    if (!o || o.type !== 'path' || store.isLocked(o)) return
     if (tool === 'node' && store.selectedIds.length === 1 && store.selectedIds[0] === o.id) return
     if (tool === 'pen' && penExtend?.id === o.id) return
     renderer?.setHoverObject(o as any, { openEnds: tool === 'pen' && !penNodes && isOpenPath(o) })
@@ -484,16 +485,21 @@ function wireObject(obj: RenderObject, el: any) {
     // stage so the tool can draw/place over existing objects.
     if ((store.activeTool !== 'select' && store.activeTool !== 'node') || spacePressed.value) return
     e.stopPropagation()
+    // The Selection tool picks whole groups; Direct Selection reaches inside.
+    const unit = store.activeTool === 'select' ? store.expandToGroups([obj.id]) : [obj.id]
     const additive = e.shiftKey
     if (additive) {
       const next = new Set(store.selectedIds)
-      if (next.has(obj.id)) next.delete(obj.id)
-      else next.add(obj.id)
+      const all = unit.every((u) => next.has(u))
+      for (const u of unit) {
+        if (all) next.delete(u)
+        else next.add(u)
+      }
       store.selectObjects([...next])
     } else if (!store.selectedIds.includes(obj.id)) {
       // Clicking an already-selected object keeps the whole selection so the
       // ensuing drag moves the group; only a fresh click collapses to one.
-      store.selectObjects([obj.id])
+      store.selectObjects(unit)
     }
   })
 }
@@ -687,7 +693,7 @@ function onMouseUp(e: MouseEvent) {
         selectAnchorsInBox(normalizeDragBox(drag.start, drag.current), drag.additive)
       } else if (drag.moved) {
         const box = normalizeDragBox(drag.start, drag.current)
-        const hits = renderer.hitTestBox(box)
+        const hits = store.expandToGroups(renderer.hitTestBox(box))
         store.selectObjects(mergeMarqueeSelection(store.selectedIds, hits, drag.additive))
       } else {
         // A click with no drag clears the selection (unless additive).
@@ -726,7 +732,7 @@ function selectAnchorsInBox(box: Box, additive: boolean) {
   const candidates = [current, ...[...store.objectOrder].reverse()].filter((id): id is string => !!id)
   for (const id of candidates) {
     const o = store.getObject(id)
-    if (!o || o.type !== 'path' || o.hidden || o.locked) continue
+    if (!o || o.type !== 'path' || store.isHidden(o) || store.isLocked(o)) continue
     const hits = renderer
       .pathAnchorsOnCanvas(o as any)
       .map((p, i) => (inside(p) ? i : -1))
@@ -845,7 +851,7 @@ function ensureScene(exclude: string[], extra: { x: number; y: number }[] = []):
   const boxes: Box[] = []
   const anchors: { x: number; y: number }[] = []
   for (const o of store.orderedObjects) {
-    if (skip.has(o.id) || o.hidden) continue
+    if (skip.has(o.id) || store.isHidden(o)) continue
     const b = store.objectCanvasBounds(o.id)
     if (b) boxes.push(b)
     if (anchors.length < MAX_ANCHORS) anchors.push(...canvasAnchors(o.id))
@@ -1093,7 +1099,7 @@ function openEndpointAt(p: { x: number; y: number }): { id: string; nodes: PathN
   const tol = penDistanceThreshold()
   for (const id of [...store.objectOrder].reverse()) {
     const o = store.getObject(id)
-    if (!o || o.type !== 'path' || o.hidden || o.locked || !isOpenPath(o)) continue
+    if (!o || o.type !== 'path' || store.isHidden(o) || store.isLocked(o) || !isOpenPath(o)) continue
     const nodes = renderer.pathNodesOnCanvas(o as any)
     if (nodes.length < 2) continue
     const near = (n: PathNode) => Math.hypot(n.x - p.x, n.y - p.y) <= tol
@@ -1639,9 +1645,7 @@ function onObjectDragEnd(id: string, { dx, dy, alt }: { dx: number; dy: number; 
   // Alt-drag leaves the originals in place and drops copies at the drag offset.
   if (alt) {
     store.snapshot('Duplicate')
-    const dups = groupIds
-      .map((gid) => store.duplicateObject(gid, { x: dx, y: dy }))
-      .filter((d): d is NonNullable<typeof d> => !!d)
+    const dups = store.duplicateObjects(groupIds, { x: dx, y: dy })
     if (dups.length) store.selectObjects(dups.map((d) => d.id))
     return
   }
@@ -1782,8 +1786,8 @@ function onKeyDown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D') && store.selectedIds.length) {
     e.preventDefault()
     store.snapshot('Duplicate')
-    const dups = [...store.selectedIds].map((id) => store.duplicateObject(id)).filter(Boolean)
-    if (dups.length) store.selectObjects(dups.map((d) => d!.id))
+    const dups = store.duplicateObjects([...store.selectedIds])
+    if (dups.length) store.selectObjects(dups.map((d) => d.id))
   }
 }
 
@@ -1814,7 +1818,10 @@ onMounted(() => {
   // Let the store measure true rendered geometry (e.g. for fit-to-artwork).
   setObjectBoxMeasurer((obj) => (renderer ? renderer.measureObjectBox(obj as any) : null))
   // Let WebMCP tools (which only have the store) drive the viewport.
-  setViewportController({ fitBox: (box, o) => fitBoxToView(box, o) })
+  setViewportController({
+    fitBox: (box, o) => fitBoxToView(box, o),
+    unitsPerPixel: () => renderer?.canvasUnitsPerPixel() ?? 1,
+  })
   renderer.setNodeEditMode(store.activeTool === 'node')
   renderer.setViewMode(store.viewMode)
   rerender()
@@ -1850,8 +1857,9 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
+// Layers too: a hidden or locked layer changes how its objects render.
 watch(
-  [artboards, objects, objectOrder],
+  [artboards, objects, objectOrder, layers],
   () => {
     rerender()
   },
@@ -1871,7 +1879,7 @@ watch(
 watch(viewMode, (mode) => renderer?.setViewMode(mode))
 
 // Any document change invalidates the cached snap scene.
-watch([objects, objectOrder, artboards], () => (snapScene = null), { deep: true })
+watch([objects, objectOrder, artboards, layers], () => (snapScene = null), { deep: true })
 
 // Shape builder regions follow the selection and any document change (undo,
 // agent edits) while the tool is armed.

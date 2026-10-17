@@ -21,6 +21,7 @@ import { placeSketch } from '@/services/capture/placeSketch'
 import { openSketchDialog } from '@/services/capture/captureState'
 import { createOutlines } from './textOutlines'
 import { expandAppearance } from './expandAppearance'
+import { canJoin, joinSelection, joinTolerance, reflectSelection, type ReflectAxis } from './pathEdit'
 
 export function buildDesignTools(
   store: CanvasStore,
@@ -59,27 +60,119 @@ export function buildDesignTools(
     {
       name: 'list_layers',
       description:
-        'Lists objects front-to-back (layers panel order) with name, type, artboard, hidden, locked and opacity.',
+        'Lists the document layers (top first, with the active one marked), the groups, and every object front-to-back with its layer, group, name, type, artboard, hidden, locked and opacity.',
       inputSchema: { type: 'object', properties: {} },
       execute() {
-        const layers = [...store.orderedObjects].reverse().map((o, i) => ({
+        const layers = [...store.layers].reverse().map((l) => ({
+          id: l.id,
+          name: l.name,
+          hidden: !!l.hidden,
+          locked: !!l.locked,
+          active: l.id === store.activeLayerId,
+        }))
+        const groups = Object.values(store.groups).map((g) => ({ id: g.id, name: g.name ?? null, parentId: g.parentId ?? null }))
+        const objects = [...store.orderedObjects].reverse().map((o, i) => ({
           index: store.objectOrder.length - 1 - i,
           id: o.id,
           name: o.name ?? null,
           type: o.type,
+          layerId: store.layerOf(o)?.id ?? null,
+          groupId: o.groupId ?? null,
           semanticRole: o.semanticRole,
           artboardId: o.artboardId,
           hidden: !!o.hidden,
           locked: !!o.locked,
           opacity: o.opacity,
         }))
-        return text({ layers, note: 'index is paint order: 0 = backmost.' })
+        return text({ layers, groups, objects, note: 'index is paint order: 0 = backmost. Higher layers paint above lower ones; new objects go into the active layer.' })
+      },
+    },
+    {
+      name: 'manage_layer',
+      description:
+        'Document layers (Illustrator-style containers for artwork). action: add (new layer above the active one, becomes active), activate (new objects go into it), rename, hide/show, lock/unlock, move (to stack index, 0 = bottom), delete (removes the layer and its objects; the last layer stays), or move_objects (put objectIds into the layer).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['add', 'activate', 'rename', 'hide', 'show', 'lock', 'unlock', 'move', 'delete', 'move_objects'] },
+          layerId: { type: 'string', description: 'Target layer (not needed for add).' },
+          name: { type: 'string' },
+          index: { type: 'number' },
+          objectIds: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['action'],
+      },
+      execute(input: { action: string; layerId?: string; name?: string; index?: number; objectIds?: string[] }) {
+        if (input.action !== 'add' && !store.getLayer(input.layerId)) return fail('Layer', new Error(`No layer ${input.layerId}`))
+        const id = input.layerId!
+        store.snapshot('Layers')
+        switch (input.action) {
+          case 'add': {
+            const l = store.addLayer(input.name)
+            log(`Added layer ${l.name}`)
+            return text({ id: l.id, name: l.name })
+          }
+          case 'activate':
+            store.setActiveLayer(id)
+            break
+          case 'rename':
+            store.renameLayer(id, input.name ?? '')
+            break
+          case 'hide':
+          case 'show':
+            store.setLayerHidden(id, input.action === 'hide')
+            break
+          case 'lock':
+          case 'unlock':
+            store.setLayerLocked(id, input.action === 'lock')
+            break
+          case 'move':
+            store.moveLayer(id, input.index ?? 0)
+            break
+          case 'delete':
+            if (!store.removeLayer(id)) return fail('Layer', new Error('The last layer cannot be deleted.'))
+            break
+          case 'move_objects':
+            store.moveObjectsToLayer(input.objectIds ?? [], id)
+            break
+        }
+        log(`Layer ${input.action}`)
+        return text({ ok: true, layers: store.layers.map((l) => l.id), activeLayerId: store.activeLayerId })
+      },
+    },
+    {
+      name: 'group_objects',
+      description:
+        'Object > Group: groups objects so they select, move and transform together (members move next to the frontmost one and into its layer). Existing groups among them nest inside the new group. With ungroup: true, releases the outermost groups of the given objects instead.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ids: { type: 'array', items: { type: 'string' } },
+          name: { type: 'string' },
+          ungroup: { type: 'boolean' },
+        },
+        required: ['ids'],
+      },
+      execute({ ids, name, ungroup }: { ids: string[]; name?: string; ungroup?: boolean }) {
+        store.snapshot(ungroup ? 'Ungroup' : 'Group')
+        if (ungroup) {
+          const released = store.ungroupObjects(ids)
+          log(`Ungrouped ${released.length} object(s)`)
+          return text({ released })
+        }
+        const gid = store.groupObjects(ids, name)
+        if (!gid) {
+          store.undo()
+          return fail('Group', new Error('Grouping needs at least two objects or groups.'))
+        }
+        log(`Grouped ${store.groupMembers(gid).length} objects`)
+        return text({ groupId: gid, members: store.groupMembers(gid) })
       },
     },
     {
       name: 'update_layer',
       description:
-        'Updates layer state of one object: rename, hide/show, lock/unlock, and/or move in paint order (exact index, 0 = backmost, or a step: forward/backward/front/back).',
+        'Updates the layers-panel state of one object: rename, hide/show, lock/unlock, and/or move in paint order within its layer (exact index, 0 = backmost, or a step: forward/backward/front/back). Use manage_layer for document layers.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -373,6 +466,44 @@ export function buildDesignTools(
           store.undo()
           return fail('Create outlines', err)
         }
+      },
+    },
+    {
+      name: 'reflect_objects',
+      description:
+        'Object > Transform > Reflect: mirrors objects horizontally (left-right) or vertically (top-bottom) across the center of their combined bounds. Paths have their geometry mirrored; text and images are flipped.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ids: { type: 'array', items: { type: 'string' } },
+          axis: { type: 'string', enum: ['horizontal', 'vertical'] },
+        },
+        required: ['ids', 'axis'],
+      },
+      async execute({ ids, axis }: { ids: string[]; axis: ReflectAxis }) {
+        reflectSelection(store, axis, ids)
+        log(`Reflected ${ids.length} object(s) ${axis}ly`)
+        return text({ ids })
+      },
+    },
+    {
+      name: 'join_paths',
+      description:
+        'Object > Path > Join: joins two open paths at their nearest endpoints into one path (endpoints that nearly touch merge into one anchor; otherwise a straight segment bridges them), or closes a single open path. The result takes the front path\'s style.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ids: { type: 'array', items: { type: 'string' }, description: 'One or two open path ids.' },
+          tolerance: { type: 'number', description: 'Merge distance in canvas units (default: 8 screen pixels).' },
+        },
+        required: ['ids'],
+      },
+      async execute({ ids, tolerance }: { ids: string[]; tolerance?: number }) {
+        if (!canJoin(store, ids)) return fail('Join paths', new Error('Join needs one or two open paths.'))
+        const id = joinSelection(store, ids, tolerance ?? joinTolerance())
+        if (!id) return fail('Join paths', new Error('Those paths could not be joined.'))
+        log('Joined paths')
+        return text({ id })
       },
     },
     {

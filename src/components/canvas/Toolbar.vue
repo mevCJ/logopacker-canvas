@@ -68,6 +68,7 @@ import { openSketchDialog } from '@/services/capture/captureState'
 import { addFontFiles, fontLibrary, loadLocalFonts } from '@/services/canvas/fontLibrary'
 import { createOutlines } from '@/services/canvas/textOutlines'
 import { expandAppearance, hasVisibleStroke } from '@/services/canvas/expandAppearance'
+import { canJoin, joinSelection, reflectSelection } from '@/services/canvas/pathEdit'
 import { snapSettings } from '@/services/canvas/snapSettings'
 
 const emit = defineEmits<{
@@ -179,6 +180,22 @@ async function outlines() {
   }
 }
 
+// Object ▸ Group / Ungroup (⌘G / ⇧⌘G).
+const selectionUnits = () => new Set(store.selectedIds.map((id) => store.topGroupOf(id) ?? id))
+const canGroup = () => selectionUnits().size >= 2
+const canUngroup = () => store.selectedIds.some((id) => store.topGroupOf(id))
+function group() {
+  if (!canGroup()) return
+  store.snapshot('Group')
+  const gid = store.groupObjects([...store.selectedIds])
+  if (gid) store.selectObjects(store.groupMembers(gid))
+}
+function ungroup() {
+  if (!canUngroup()) return
+  store.snapshot('Ungroup')
+  store.selectObjects(store.ungroupObjects([...store.selectedIds]))
+}
+
 // Object ▸ Expand Appearance: strokes become filled outlines.
 async function expand() {
   const ids = store.selectedObjects.filter(hasVisibleStroke).map((o) => o.id)
@@ -223,8 +240,8 @@ function addFontFile() {
 function duplicate() {
   if (!hasSel()) return
   store.snapshot('Duplicate')
-  const dups = [...store.selectedIds].map((id) => store.duplicateObject(id)).filter(Boolean)
-  if (dups.length) store.selectObjects(dups.map((d) => d!.id))
+  const dups = store.duplicateObjects([...store.selectedIds])
+  if (dups.length) store.selectObjects(dups.map((d) => d.id))
 }
 
 const menus = computed<Menu[]>(() => [
@@ -270,6 +287,9 @@ const menus = computed<Menu[]>(() => [
       { label: 'Send Backward', keys: { mod: true, key: 'BracketLeft' }, action: () => arrange('backward'), disabled: () => !hasSel() },
       { label: 'Send to Back', keys: { mod: true, shift: true, key: 'BracketLeft' }, action: () => arrange('back'), disabled: () => !hasSel() },
       SEP,
+      { label: 'Group', keys: { mod: true, key: 'KeyG' }, action: group, disabled: () => !canGroup() },
+      { label: 'Ungroup', keys: { mod: true, shift: true, key: 'KeyG' }, action: ungroup, disabled: () => !canUngroup() },
+      SEP,
       { label: 'Lock Selection', keys: { mod: true, key: 'Digit2' }, action: forSel('Lock', (id) => store.setObjectLocked(id, true)), disabled: () => !hasSel() },
       {
         label: 'Unlock All',
@@ -291,6 +311,12 @@ const menus = computed<Menu[]>(() => [
         disabled: () => !store.orderedObjects.some((o) => o.hidden),
       },
       SEP,
+      { header: 'Transform' },
+      { label: 'Reflect Horizontal', action: () => reflectSelection(store, 'horizontal'), disabled: () => !hasSel() },
+      { label: 'Reflect Vertical', action: () => reflectSelection(store, 'vertical'), disabled: () => !hasSel() },
+      SEP,
+      { header: 'Path' },
+      { label: 'Join', keys: { mod: true, key: 'KeyJ' }, action: () => joinSelection(store), disabled: () => !canJoin(store, store.selectedIds) },
       { label: 'Expand Appearance', action: expand, disabled: () => !store.selectedObjects.some(hasVisibleStroke) },
       SEP,
       { header: 'Pathfinder' },

@@ -75,6 +75,33 @@
         />
       </section>
 
+      <template v-if="multiPaths.length">
+        <section class="pp-section">
+          <label class="pp-label">Stroke</label>
+          <ColorPicker
+            :model-value="multiStroke"
+            :swatches="docColors"
+            @begin="store.snapshot('Recolor')"
+            @update:model-value="setMultiStroke"
+          />
+        </section>
+
+        <section class="pp-section">
+          <label class="pp-label">Stroke width</label>
+          <input
+            type="number"
+            min="0"
+            step="0.5"
+            class="pp-number"
+            :value="multiStrokeWidth"
+            placeholder="Mixed"
+            @change="setMultiStrokeWidth(num($event))"
+          />
+        </section>
+
+        <StrokeStyleControl :cap="multiCap" :join="multiJoin" @change="setMultiStrokeStyle" />
+      </template>
+
       <section class="pp-section">
         <label class="pp-label">Opacity <span class="pp-value">{{ Math.round(multiOpacity * 100) }}%</span></label>
         <input type="range" min="0" max="1" step="0.01" class="pp-range" :value="multiOpacity" @pointerdown="store.snapshot('Opacity')" @input="setMultiOpacity(num($event))" />
@@ -122,45 +149,11 @@
           <input type="number" min="0" step="0.5" class="pp-number" :value="selected.strokeWidth" @input="setStrokeWidth(num($event))" />
         </section>
 
-        <section class="pp-section pp-row-2">
-          <div>
-            <label class="pp-label">Cap</label>
-            <div class="pp-align">
-              <button
-                v-for="c in capOptions"
-                :key="c.value"
-                class="pp-align-btn pp-icon-btn"
-                :class="{ active: (selected.strokeLinecap || 'butt') === c.value }"
-                :title="c.title"
-                :aria-label="c.title"
-                @click="setStrokeStyle({ cap: c.value })"
-              >
-                <svg viewBox="0 0 18 14" width="18" height="14" aria-hidden="true">
-                  <line x1="2" y1="7" x2="10" y2="7" stroke="currentColor" stroke-width="6" :stroke-linecap="c.value" />
-                  <line x1="10" y1="1" x2="10" y2="13" stroke="#ef4444" stroke-width="1" />
-                </svg>
-              </button>
-            </div>
-          </div>
-          <div>
-            <label class="pp-label">Corner</label>
-            <div class="pp-align">
-              <button
-                v-for="j in joinOptions"
-                :key="j.value"
-                class="pp-align-btn pp-icon-btn"
-                :class="{ active: (selected.strokeLinejoin || 'miter') === j.value }"
-                :title="j.title"
-                :aria-label="j.title"
-                @click="setStrokeStyle({ join: j.value })"
-              >
-                <svg viewBox="0 0 18 14" width="18" height="14" aria-hidden="true">
-                  <polyline points="4,13 4,4 15,4" fill="none" stroke="currentColor" stroke-width="5" :stroke-linejoin="j.value" />
-                </svg>
-              </button>
-            </div>
-          </div>
-        </section>
+        <StrokeStyleControl
+          :cap="selected.strokeLinecap || 'butt'"
+          :join="selected.strokeLinejoin || 'miter'"
+          @change="setStrokeStyle"
+        />
 
         <section v-if="maxCornerRadius > 0" class="pp-section">
           <label class="pp-label">Corner radius <span class="pp-value">{{ Math.round(selected.cornerRadius || 0) }}</span></label>
@@ -309,6 +302,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import ColorPicker from './ColorPicker.vue'
 import FillControl from './FillControl.vue'
 import FontPicker from './FontPicker.vue'
+import StrokeStyleControl from './StrokeStyleControl.vue'
 import { weightOptions } from '@/services/canvas/fontLibrary'
 import { createOutlines } from '@/services/canvas/textOutlines'
 import { applyPathfinder, type PathfinderOp } from '@/services/canvas/pathBoolean'
@@ -336,6 +330,14 @@ const multiFill = computed(() => {
   const fills = new Set(multiPaintable.value.map((o) => (o as { fill: string }).fill))
   return fills.size === 1 ? [...fills][0]! : ''
 })
+// A value shared by every selected path, or '' when they differ.
+function shared<T>(values: T[]): T | '' {
+  return values.length && values.every((v) => v === values[0]) ? values[0]! : ''
+}
+const multiStroke = computed(() => String(shared(multiPaths.value.map((o) => (o as { stroke: string }).stroke))))
+const multiStrokeWidth = computed(() => shared(multiPaths.value.map((o) => (o as { strokeWidth: number }).strokeWidth)))
+const multiCap = computed(() => shared(multiPaths.value.map((o) => (o as { strokeLinecap?: StrokeCap }).strokeLinecap || 'butt')))
+const multiJoin = computed(() => shared(multiPaths.value.map((o) => (o as { strokeLinejoin?: StrokeJoin }).strokeLinejoin || 'miter')))
 const multiOpacity = computed(() => {
   const list = multi.value
   return list.length ? list.reduce((s, o) => s + (o.opacity ?? 1), 0) / list.length : 1
@@ -396,6 +398,17 @@ async function runPathfinder(op: PathfinderOp) {
 
 function setMultiFill(v: string) {
   for (const o of multiPaintable.value) store.setFill(o.id, v)
+}
+function setMultiStroke(v: string) {
+  for (const o of multiPaths.value) store.setStroke(o.id, { stroke: v })
+}
+function setMultiStrokeWidth(v: number) {
+  store.snapshot('Stroke weight')
+  for (const o of multiPaths.value) store.setStroke(o.id, { strokeWidth: Math.max(0, v) })
+}
+function setMultiStrokeStyle(patch: { cap?: StrokeCap; join?: StrokeJoin }) {
+  store.snapshot('Stroke style')
+  for (const o of multiPaths.value) store.setStroke(o.id, patch)
 }
 function setMultiOpacity(v: number) {
   for (const o of multi.value) store.setOpacity(o.id, v)
@@ -494,17 +507,6 @@ function setStrokeWidth(v: number) {
   if (!selected.value) return
   store.setStroke(selected.value.id, { strokeWidth: v })
 }
-// Illustrator's stroke Cap and Corner options.
-const capOptions: { value: StrokeCap; title: string }[] = [
-  { value: 'butt', title: 'Butt cap' },
-  { value: 'round', title: 'Round cap' },
-  { value: 'square', title: 'Projecting cap' },
-]
-const joinOptions: { value: StrokeJoin; title: string }[] = [
-  { value: 'miter', title: 'Miter join' },
-  { value: 'round', title: 'Round join' },
-  { value: 'bevel', title: 'Bevel join' },
-]
 function setStrokeStyle(patch: { cap?: StrokeCap; join?: StrokeJoin }) {
   if (!selected.value) return
   store.snapshot('Stroke style')
@@ -662,12 +664,6 @@ function fitArtboardToArtwork() {
   font-size: 12px;
   text-transform: capitalize;
   cursor: pointer;
-}
-.pp-icon-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 5px 0;
 }
 .pp-align-btn.active {
   background: #211a43;

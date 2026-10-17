@@ -8,6 +8,7 @@
 import {
   absolutePosition,
   axisScale,
+  objectFlip,
   displayPathData,
   pathAttrs,
   textAttrs,
@@ -93,11 +94,11 @@ export function objectSvgMarkup(
 
   if (obj.type === 'text') {
     // Text carries its size via fontSize (no scale); baseline at y = fontSize.
-    const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1)
+    const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, dispW / 2, dispH / 2, objectFlip(obj))
     if (obj.area && !obj.pathD) {
       // Area type: pre-wrapped lines (same layout as the canvas), rotated
       // about the box center.
-      const t = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1)
+      const t = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, dispW / 2, dispH / 2, objectFlip(obj))
       const attrs = serializeAttrs({ ...textAttrs(obj), transform: t, 'xml:space': 'preserve' })
       const tspans = layoutAreaText(obj)
         .lines.map((l) => `<tspan x="${l.x}" y="${l.y}">${escapeXml(l.text)}</tspan>`)
@@ -127,7 +128,7 @@ export function objectSvgMarkup(
   // image
   const sx = axisScale(dispW, obj.baseWidth)
   const sy = axisScale(dispH, obj.baseHeight)
-  const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy)
+  const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy, dispW / 2, dispH / 2, objectFlip(obj))
   const attrs = serializeAttrs({ ...imageAttrs(obj), x: 0, y: 0, transform })
   return `<image${attrs} />`
 }

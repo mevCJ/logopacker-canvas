@@ -113,6 +113,14 @@ interface BaseObject {
   baseHeight: number
   rotation: number
   opacity: number
+  // Mirrored on the object's own horizontal/vertical axis (text and images;
+  // reflecting a path rewrites its geometry instead).
+  flipX?: boolean
+  flipY?: boolean
+  // The layer the object lives in (see Layer) and the innermost group it
+  // belongs to, if any (see Group).
+  layerId?: string
+  groupId?: string
   // Layers panel state. `name` overrides the auto label; hidden objects aren't
   // drawn or exported; locked objects can't be picked on the canvas.
   name?: string
@@ -207,6 +215,31 @@ export interface ActivityGroup {
   ts: number
 }
 
+// A document layer, as in Illustrator: a named container for artwork. Layers
+// stack bottom (index 0) to top; everything in a higher layer paints above
+// everything in a lower one. New artwork goes into the active layer. A hidden
+// or locked layer hides or locks everything in it.
+export interface Layer {
+  id: string
+  name: string
+  color: string
+  hidden?: boolean
+  locked?: boolean
+}
+
+// A group: objects that select, move and transform as one. Groups nest: an
+// object's groupId is its innermost group, and a group's parentId the group
+// that contains it. Members of a group are contiguous in paint order and share
+// a layer.
+export interface Group {
+  id: string
+  name?: string
+  parentId?: string
+}
+
+// Selection-box colors Illustrator cycles through for new layers.
+const LAYER_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#9333ea', '#ea580c', '#0891b2', '#db2777', '#65a30d']
+
 interface HistoryEntry {
   label: string
   state: SerializedState
@@ -219,6 +252,9 @@ interface SerializedState {
   objectOrder: string[]
   selectedIds: string[]
   selectedArtboardId: string | null
+  layers: Layer[]
+  groups: Record<string, Group>
+  activeLayerId: string | null
 }
 
 // Bump when the saved-document shape changes in a breaking way.
@@ -233,6 +269,9 @@ export interface CanvasDocument {
   artboards: Artboard[]
   objects: Record<string, CanvasObject>
   objectOrder: string[]
+  // Absent in documents saved before layers and groups existed.
+  layers?: Layer[]
+  groups?: Record<string, Group>
   viewport: { x: number; y: number; zoom: number }
   idCounter: number
 }
@@ -241,6 +280,9 @@ export interface CanvasState {
   artboards: Artboard[]
   objects: Record<string, CanvasObject>
   objectOrder: string[]
+  layers: Layer[]
+  groups: Record<string, Group>
+  activeLayerId: string | null
   selectedIds: string[]
   selectedArtboardId: string | null
   viewport: { x: number; y: number; zoom: number }
@@ -332,6 +374,8 @@ export function setObjectBoxMeasurer(fn: ObjectBoxMeasurer | null): void {
 // box's larger side) into view. Absent in non-DOM/test environments.
 export interface ViewportController {
   fitBox: (box: Box, opts?: { paddingRatio?: number }) => void
+  // Canvas units per screen pixel at the current zoom.
+  unitsPerPixel?: () => number
 }
 
 let viewportController: ViewportController | null = null
@@ -353,6 +397,9 @@ export const useCanvasStore = defineStore('canvas', {
     artboards: [],
     objects: {},
     objectOrder: [],
+    layers: [],
+    groups: {},
+    activeLayerId: null,
     selectedIds: [],
     selectedArtboardId: null,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -569,8 +616,13 @@ export const useCanvasStore = defineStore('canvas', {
       if (payload.baseWidth === undefined) obj.baseWidth = obj.width
       if (payload.baseHeight === undefined) obj.baseHeight = obj.height
 
+      // New artwork goes into the active layer (or the one asked for).
+      obj.layerId = obj.layerId && this.getLayer(obj.layerId) ? obj.layerId : this.ensureActiveLayer().id
+      if (obj.groupId && !this.groups[obj.groupId]) delete obj.groupId
+
       this.objects[id] = obj
       this.objectOrder.push(id)
+      this._sortByLayers()
 
       if (artboardId) {
         const artboard = this.getArtboard(artboardId)
@@ -611,7 +663,9 @@ export const useCanvasStore = defineStore('canvas', {
       if (oi !== -1) this.objectOrder.splice(oi, 1)
       const si = this.selectedIds.indexOf(id)
       if (si !== -1) this.selectedIds.splice(si, 1)
+      const gid = obj.groupId
       delete this.objects[id]
+      if (gid) this._pruneGroups()
       return true
     },
 
@@ -644,6 +698,7 @@ export const useCanvasStore = defineStore('canvas', {
       if (i === -1) return false
       this.objectOrder.splice(i, 1)
       this.objectOrder.push(id)
+      this._sortByLayers()
       return true
     },
     sendToBack(id: string): boolean {
@@ -651,6 +706,7 @@ export const useCanvasStore = defineStore('canvas', {
       if (i === -1) return false
       this.objectOrder.splice(i, 1)
       this.objectOrder.unshift(id)
+      this._sortByLayers()
       return true
     },
     // Move an object to an exact paint-order index (0 = backmost), clamped.
@@ -660,6 +716,7 @@ export const useCanvasStore = defineStore('canvas', {
       this.objectOrder.splice(i, 1)
       const to = Math.max(0, Math.min(this.objectOrder.length, Math.round(index)))
       this.objectOrder.splice(to, 0, id)
+      this._sortByLayers()
       return true
     },
     // Step one place up (toward the front) or down in paint order.
@@ -669,19 +726,30 @@ export const useCanvasStore = defineStore('canvas', {
       return this.reorderObject(id, i + delta)
     },
 
+    // An object's canvas-space box in its un-rotated frame (the renderer's
+    // measured box when available). Its center is the object's rotation pivot.
+    objectUnrotatedBox(id: string): Box | null {
+      const o = this.objects[id]
+      if (!o) return null
+      const ab = o.artboardId ? this.getArtboard(o.artboardId) : null
+      const measured = measureObjectBox ? measureObjectBox(o) : null
+      return (
+        measured ?? {
+          x: (ab?.x ?? 0) + (o.x || 0),
+          y: (ab?.y ?? 0) + (o.y || 0),
+          width: o.width || 0,
+          height: o.height || 0,
+        }
+      )
+    },
+
     // Absolute (canvas-space) axis-aligned bounds of an object as drawn: the
     // renderer's measured box when available, expanded for rotation.
     objectCanvasBounds(id: string): Box | null {
       const o = this.objects[id]
       if (!o) return null
-      const ab = o.artboardId ? this.getArtboard(o.artboardId) : null
-      const measured = measureObjectBox ? measureObjectBox(o) : null
-      const box = measured ?? {
-        x: (ab?.x ?? 0) + (o.x || 0),
-        y: (ab?.y ?? 0) + (o.y || 0),
-        width: o.width || 0,
-        height: o.height || 0,
-      }
+      const box = this.objectUnrotatedBox(id)
+      if (!box) return null
       if (!o.rotation) return box
       const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
       const pts = [
@@ -1091,13 +1159,301 @@ export const useCanvasStore = defineStore('canvas', {
         .filter((o): o is CanvasObject => !!o && o.semanticRole === role)
     },
 
+    // ---- Layers ------------------------------------------------------------
+    getLayer(id: string | null | undefined): Layer | null {
+      return (id && this.layers.find((l) => l.id === id)) || null
+    },
+    // The layer an object lives in (its own, else the bottom layer).
+    layerOf(o: CanvasObject): Layer | null {
+      return this.getLayer(o.layerId) ?? this.layers[0] ?? null
+    },
+    // Hidden or locked, itself or through its layer.
+    isHidden(o: CanvasObject): boolean {
+      return !!o.hidden || !!this.layerOf(o)?.hidden
+    },
+    isLocked(o: CanvasObject): boolean {
+      return !!o.locked || !!this.layerOf(o)?.locked
+    },
+    // The active layer, creating "Layer 1" for an empty document.
+    ensureActiveLayer(): Layer {
+      const active = this.getLayer(this.activeLayerId)
+      if (active) return active
+      const top = this.layers[this.layers.length - 1]
+      if (top) {
+        this.activeLayerId = top.id
+        return top
+      }
+      return this.addLayer()
+    },
+    // Add a layer above the active one (or on top) and make it active.
+    addLayer(name?: string): Layer {
+      const id = makeId('layer', this)
+      const n = this.layers.length
+      const layer: Layer = { id, name: name?.trim() || `Layer ${n + 1}`, color: LAYER_COLORS[n % LAYER_COLORS.length]! }
+      const ai = this.layers.findIndex((l) => l.id === this.activeLayerId)
+      this.layers.splice(ai === -1 ? n : ai + 1, 0, layer)
+      this.activeLayerId = id
+      return layer
+    },
+    setActiveLayer(id: string): Layer | null {
+      const layer = this.getLayer(id)
+      if (layer) this.activeLayerId = id
+      return layer
+    },
+    renameLayer(id: string, name: string): Layer | null {
+      const layer = this.getLayer(id)
+      if (layer && name.trim()) layer.name = name.trim()
+      return layer
+    },
+    setLayerHidden(id: string, hidden: boolean): void {
+      const layer = this.getLayer(id)
+      if (!layer) return
+      layer.hidden = hidden || undefined
+      this.selectedIds = this.selectedIds.filter((oid) => !this.isHidden(this.objects[oid]!))
+    },
+    setLayerLocked(id: string, locked: boolean): void {
+      const layer = this.getLayer(id)
+      if (!layer) return
+      layer.locked = locked || undefined
+      this.selectedIds = this.selectedIds.filter((oid) => !this.isLocked(this.objects[oid]!))
+    },
+    // Move a layer to a stack position (0 = bottom).
+    moveLayer(id: string, index: number): void {
+      const i = this.layers.findIndex((l) => l.id === id)
+      if (i === -1) return
+      const [layer] = this.layers.splice(i, 1)
+      this.layers.splice(Math.max(0, Math.min(this.layers.length, index)), 0, layer!)
+      this._sortByLayers()
+    },
+    // Delete a layer and the artwork in it. The last layer can't go.
+    removeLayer(id: string): boolean {
+      if (this.layers.length <= 1 || !this.getLayer(id)) return false
+      for (const o of Object.values(this.objects)) if (this.layerOf(o)?.id === id) this.removeObject(o.id)
+      this.layers = this.layers.filter((l) => l.id !== id)
+      if (this.activeLayerId === id) this.activeLayerId = this.layers[this.layers.length - 1]!.id
+      return true
+    },
+    // Move objects (whole groups) to the top of a layer, keeping their
+    // stacking among themselves.
+    moveObjectsToLayer(ids: string[], layerId: string): void {
+      if (!this.getLayer(layerId)) return
+      const moving = this.expandToGroups(ids)
+      for (const oid of moving) this.objects[oid]!.layerId = layerId
+      this.objectOrder = [...this.objectOrder.filter((oid) => !moving.includes(oid)), ...moving]
+      this._sortByLayers()
+    },
+    // Keep paint order grouped by layer (stable within each layer).
+    _sortByLayers(): void {
+      if (this.layers.length < 2) return
+      const rank = new Map(this.layers.map((l, i) => [l.id, i]))
+      const pos = new Map(this.objectOrder.map((oid, i) => [oid, i]))
+      const r = (oid: string) => rank.get(this.objects[oid]?.layerId ?? '') ?? 0
+      this.objectOrder.sort((a, b) => r(a) - r(b) || pos.get(a)! - pos.get(b)!)
+    },
+    // Objects with their layer's visibility and lock applied, as the renderer
+    // and exporters should see them (a deep copy).
+    renderObjects(): Record<string, CanvasObject> {
+      const out: Record<string, CanvasObject> = JSON.parse(JSON.stringify(this.objects))
+      for (const o of Object.values(out)) {
+        const layer = this.layerOf(o)
+        if (layer?.hidden) o.hidden = true
+        if (layer?.locked) o.locked = true
+      }
+      return out
+    },
+
+    // ---- Groups ------------------------------------------------------------
+    // The outermost group an object belongs to, or null.
+    topGroupOf(id: string): string | null {
+      let gid = this.objects[id]?.groupId
+      if (!gid || !this.groups[gid]) return null
+      const seen = new Set<string>()
+      while (this.groups[gid]?.parentId && this.groups[this.groups[gid]!.parentId!] && !seen.has(gid)) {
+        seen.add(gid)
+        gid = this.groups[gid]!.parentId!
+      }
+      return gid
+    },
+    // Whether an object is inside a group (at any depth).
+    inGroup(id: string, groupId: string): boolean {
+      let gid = this.objects[id]?.groupId
+      const seen = new Set<string>()
+      while (gid && !seen.has(gid)) {
+        if (gid === groupId) return true
+        seen.add(gid)
+        gid = this.groups[gid]?.parentId
+      }
+      return false
+    },
+    // Every object in a group (nested groups included), in paint order.
+    groupMembers(groupId: string): string[] {
+      return this.objectOrder.filter((oid) => this.inGroup(oid, groupId))
+    },
+    // Widen ids to whole outermost groups: a click on any member of a group
+    // selects the group.
+    expandToGroups(ids: string[]): string[] {
+      const out = new Set<string>()
+      for (const oid of ids) {
+        const top = this.topGroupOf(oid)
+        if (top) this.groupMembers(top).forEach((m) => out.add(m))
+        else if (this.objects[oid]) out.add(oid)
+      }
+      return this.objectOrder.filter((oid) => out.has(oid))
+    },
+    // Group the given objects (whole groups among them nest inside the new
+    // one). Members move next to the frontmost one in paint order and into
+    // its layer. Returns the new group's id, or null for fewer than 2 items.
+    groupObjects(ids: string[], name?: string): string | null {
+      const members = this.expandToGroups(ids)
+      const tops = new Set(members.map((oid) => this.topGroupOf(oid) ?? oid))
+      // A single object or a single existing group has nothing to group with.
+      if (tops.size < 2) return null
+      const gid = makeId('group', this)
+      this.groups[gid] = { id: gid, ...(name?.trim() ? { name: name.trim() } : {}) }
+      for (const top of tops) {
+        if (this.groups[top]) this.groups[top]!.parentId = gid
+        else this.objects[top]!.groupId = gid
+      }
+      // Contiguous at the frontmost member, in the frontmost member's layer.
+      const front = members[members.length - 1]!
+      const layerId = this.objects[front]!.layerId
+      for (const m of members) this.objects[m]!.layerId = layerId
+      const rest = this.objectOrder.filter((oid) => !members.includes(oid))
+      const frontIndex = this.objectOrder.indexOf(front)
+      const before = this.objectOrder.slice(0, frontIndex + 1).filter((oid) => !members.includes(oid)).length
+      rest.splice(before, 0, ...members)
+      this.objectOrder = rest
+      this._sortByLayers()
+      return gid
+    },
+    // Ungroup the outermost groups of the given objects (one level, as
+    // Illustrator does). Returns the ids that were in them.
+    ungroupObjects(ids: string[]): string[] {
+      const tops = new Set(ids.map((oid) => this.topGroupOf(oid)).filter((g): g is string => !!g))
+      const released: string[] = []
+      for (const gid of tops) {
+        released.push(...this.groupMembers(gid))
+        for (const o of Object.values(this.objects)) if (o.groupId === gid) delete o.groupId
+        for (const g of Object.values(this.groups)) if (g.parentId === gid) delete g.parentId
+        delete this.groups[gid]
+      }
+      return released
+    },
+    renameGroup(id: string, name: string): void {
+      const g = this.groups[id]
+      if (!g) return
+      if (name.trim()) g.name = name.trim()
+      else delete g.name
+    },
+    // Drop groups left with nothing in them (after deletes).
+    _pruneGroups(): void {
+      let changed = true
+      while (changed) {
+        changed = false
+        for (const gid of Object.keys(this.groups)) {
+          const objectKids = Object.values(this.objects).filter((o) => o.groupId === gid)
+          const groupKids = Object.values(this.groups).filter((g) => g.parentId === gid)
+          if (objectKids.length + groupKids.length === 0) {
+            delete this.groups[gid]
+            changed = true
+          }
+        }
+      }
+    },
+    // Layers panel drag and drop: move an object or a whole group next to a
+    // target row (above = in front of it), into the target's layer and group;
+    // or, for a layer target, to the top of that layer outside any group.
+    relocate(
+      drag: { kind: 'object' | 'group'; id: string },
+      target: { kind: 'object' | 'group' | 'layer'; id: string },
+      above = true,
+    ): boolean {
+      const moving = drag.kind === 'group' ? this.groupMembers(drag.id) : this.objects[drag.id] ? [drag.id] : []
+      if (!moving.length) return false
+      let layerId: string | undefined
+      let parent: string | undefined
+      let refIds: string[] = []
+      if (target.kind === 'layer') {
+        if (!this.getLayer(target.id)) return false
+        layerId = target.id
+      } else if (target.kind === 'group') {
+        if (!this.groups[target.id]) return false
+        refIds = this.groupMembers(target.id)
+        parent = this.groups[target.id]!.parentId
+      } else {
+        const t = this.objects[target.id]
+        if (!t) return false
+        refIds = [target.id]
+        parent = t.groupId
+      }
+      if (refIds.some((r) => moving.includes(r))) return false
+      // A group can't move into itself.
+      if (drag.kind === 'group' && parent) {
+        for (let g: string | undefined = parent; g; g = this.groups[g]?.parentId) if (g === drag.id) return false
+      }
+      if (!layerId) layerId = this.objects[refIds[0]!]!.layerId
+      for (const m of moving) this.objects[m]!.layerId = layerId
+      if (drag.kind === 'object') {
+        if (parent) this.objects[drag.id]!.groupId = parent
+        else delete this.objects[drag.id]!.groupId
+      } else if (parent) this.groups[drag.id]!.parentId = parent
+      else delete this.groups[drag.id]!.parentId
+      const rest = this.objectOrder.filter((oid) => !moving.includes(oid))
+      let at: number
+      if (target.kind === 'layer') {
+        // Just above the layer's frontmost object (sorting puts it in place).
+        at = rest.length
+      } else {
+        const idx = refIds.map((r) => rest.indexOf(r))
+        at = above ? Math.max(...idx) + 1 : Math.min(...idx)
+      }
+      rest.splice(at, 0, ...moving)
+      this.objectOrder = rest
+      this._sortByLayers()
+      this._pruneGroups()
+      return true
+    },
+
+    // Duplicate objects; groups wholly inside the set are duplicated too, so a
+    // copied group is a new group. Returns the copies in paint order.
+    duplicateObjects(ids: string[], offset: { x: number; y: number } = { x: 20, y: 20 }): CanvasObject[] {
+      const set = new Set(ids)
+      const groupMap = new Map<string, string>()
+      const whole = (gid: string) => this.groupMembers(gid).every((m) => set.has(m))
+      const mapGroup = (gid: string | undefined): string | undefined => {
+        if (!gid || !this.groups[gid]) return undefined
+        if (!whole(gid)) return gid
+        if (!groupMap.has(gid)) {
+          const src = this.groups[gid]!
+          const nid = makeId('group', this)
+          groupMap.set(gid, nid)
+          this.groups[nid] = { id: nid, ...(src.name ? { name: src.name } : {}) }
+          const parent = mapGroup(src.parentId)
+          if (parent) this.groups[nid]!.parentId = parent
+        }
+        return groupMap.get(gid)
+      }
+      const copies: CanvasObject[] = []
+      for (const oid of this.objectOrder.filter((x) => set.has(x))) {
+        const src = this.objects[oid]
+        if (!src) continue
+        const clone = JSON.parse(JSON.stringify(src)) as AddObjectPayload
+        delete clone.id
+        clone.groupId = mapGroup(src.groupId)
+        clone.x = (src.x || 0) + (offset.x || 0)
+        clone.y = (src.y || 0) + (offset.y || 0)
+        copies.push(this.addObject(clone))
+      }
+      return copies
+    },
+
     // ---- Selection ---------------------------------------------------------
     selectObjects(ids: string[] | string = []): string[] {
       const arr = Array.isArray(ids) ? ids : [ids]
       // Hidden and locked objects are not selectable (layers panel rules).
       this.selectedIds = arr.filter((id) => {
         const o = this.objects[id]
-        return !!o && !o.hidden && !o.locked
+        return !!o && !this.isHidden(o) && !this.isLocked(o)
       })
       // Object and artboard selection are mutually exclusive.
       if (this.selectedIds.length) this.selectedArtboardId = null
@@ -1150,6 +1506,9 @@ export const useCanvasStore = defineStore('canvas', {
         objectOrder: [...this.objectOrder],
         selectedIds: [...this.selectedIds],
         selectedArtboardId: this.selectedArtboardId,
+        layers: JSON.parse(JSON.stringify(this.layers)),
+        groups: JSON.parse(JSON.stringify(this.groups)),
+        activeLayerId: this.activeLayerId,
       }
     },
 
@@ -1174,6 +1533,9 @@ export const useCanvasStore = defineStore('canvas', {
       this.artboards = JSON.parse(JSON.stringify(state.artboards))
       this.objects = JSON.parse(JSON.stringify(state.objects))
       this.objectOrder = [...state.objectOrder]
+      this.layers = JSON.parse(JSON.stringify(state.layers || []))
+      this.groups = JSON.parse(JSON.stringify(state.groups || {}))
+      this.activeLayerId = state.activeLayerId && this.getLayer(state.activeLayerId) ? state.activeLayerId : (this.layers.at(-1)?.id ?? null)
       this.selectedIds = (state.selectedIds || []).filter((id) => !!this.objects[id])
       const abId = state.selectedArtboardId || null
       this.selectedArtboardId = abId && this.getArtboard(abId) ? abId : null
@@ -1194,6 +1556,8 @@ export const useCanvasStore = defineStore('canvas', {
         artboards: JSON.parse(JSON.stringify(this.artboards)),
         objects: JSON.parse(JSON.stringify(this.objects)),
         objectOrder: [...this.objectOrder],
+        layers: JSON.parse(JSON.stringify(this.layers)),
+        groups: JSON.parse(JSON.stringify(this.groups)),
         viewport: { ...this.viewport },
         idCounter: this._idCounter,
       }
@@ -1245,6 +1609,24 @@ export const useCanvasStore = defineStore('canvas', {
       this.objectOrder = order
       this.selectedIds = []
       this.selectedArtboardId = null
+      // Layers and groups: keep well-formed entries; older documents get one
+      // layer holding everything.
+      this.layers = (Array.isArray(doc.layers) ? doc.layers : [])
+        .filter((l) => l && typeof l.id === 'string')
+        .map((l, i) => ({ ...l, name: String(l.name || `Layer ${i + 1}`), color: l.color || LAYER_COLORS[i % LAYER_COLORS.length]! }))
+      this.groups = {}
+      for (const [gid, g] of Object.entries(doc.groups || {})) {
+        if (g && typeof g === 'object') this.groups[gid] = { ...g, id: gid }
+      }
+      this.activeLayerId = null
+      const fallback = this.ensureActiveLayer().id
+      for (const obj of Object.values(objects)) {
+        if (!obj.layerId || !this.getLayer(obj.layerId)) obj.layerId = fallback
+        if (obj.groupId && !this.groups[obj.groupId]) delete obj.groupId
+      }
+      for (const g of Object.values(this.groups)) if (g.parentId && !this.groups[g.parentId]) delete g.parentId
+      this._pruneGroups()
+      this._sortByLayers()
 
       const vp = doc.viewport
       this.viewport =

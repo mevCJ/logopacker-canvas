@@ -97,7 +97,7 @@ export async function sampleColorAt(
     const objEl = el.closest('.canvas-object')
     if (objEl && !objEl.classList.contains('is-editing')) {
       const o = store.getObject(objEl.id)
-      if (!o || o.hidden) continue
+      if (!o || store.isHidden(o)) continue
       if (o.type === 'image') {
         const color = await samplePixel(objEl as SVGImageElement, o.href, clientX, clientY)
         if (color) return { color, sourceId: o.id }

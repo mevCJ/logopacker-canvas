@@ -92,6 +92,16 @@
         </button>
       </div>
 
+      <span class="cb-sep" />
+      <div class="cb-field">
+        <button v-for="r in REFLECTS" :key="r.axis" type="button" class="cb-icon" :title="r.title" :aria-label="r.title" @click="reflectSelection(store, r.axis)">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" v-html="r.icon" />
+        </button>
+        <button v-if="joinable" type="button" class="cb-btn" :title="objects.length > 1 ? 'Join the two paths at their nearest ends (Cmd/Ctrl+J)' : 'Close the path (Cmd/Ctrl+J)'" @click="joinSelection(store)">
+          {{ objects.length > 1 ? 'Join' : 'Close Path' }}
+        </button>
+      </div>
+
       <template v-if="single">
         <span class="cb-sep" />
         <div class="cb-field cb-transform">
@@ -168,6 +178,7 @@ import { openSketchDialog } from '@/services/capture/captureState'
 import FontPicker from './FontPicker.vue'
 import { weightOptions } from '@/services/canvas/fontLibrary'
 import { createOutlines } from '@/services/canvas/textOutlines'
+import { canJoin, joinSelection, reflectSelection, type ReflectAxis } from '@/services/canvas/pathEdit'
 
 const emit = defineEmits<{ (e: 'fit-view'): void }>()
 const store = useCanvasStore()
@@ -277,6 +288,21 @@ function resize(dim: 'width' | 'height', v: number) {
     store.resizeObject(o.id, { [dim]: v })
   }
 }
+
+// Reflect across the selection's center (Object ▸ Transform ▸ Reflect).
+const REFLECTS: { axis: ReflectAxis; title: string; icon: string }[] = [
+  {
+    axis: 'horizontal',
+    title: 'Reflect Horizontal',
+    icon: '<path d="M12 3v18" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 2"/><path d="M10 6 3 18h7z" fill="currentColor"/><path d="M14 6l7 12h-7z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+  },
+  {
+    axis: 'vertical',
+    title: 'Reflect Vertical',
+    icon: '<path d="M3 12h18" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 2"/><path d="M6 10 18 3v7z" fill="currentColor"/><path d="M6 14l12 7v-7z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+  },
+]
+const joinable = computed(() => canJoin(store, store.selectedIds))
 
 const ALIGNS: { edge: AlignEdge; title: string; icon: string }[] = [
   { edge: 'left', title: 'Horizontal Align Left', icon: '<path d="M4 3v18" stroke="currentColor" stroke-width="2"/><rect x="7" y="6" width="12" height="4" fill="currentColor"/><rect x="7" y="14" width="7" height="4" fill="currentColor"/>' },
