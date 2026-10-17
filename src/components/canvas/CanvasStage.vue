@@ -6,6 +6,7 @@
     @wheel.prevent="onWheel"
     @mousedown="onMouseDown"
     @mousemove="onStageMouseMove"
+    @mouseleave="onStageMouseLeave"
     @dblclick="onStageDblClick"
   >
     <textarea
@@ -836,8 +837,9 @@ function canvasAnchors(id: string): { x: number; y: number }[] {
   return renderer.objectLocalToCanvas(o as any, localAnchors(o))
 }
 
-function ensureScene(exclude: string[]): SnapScene {
-  const k = exclude.slice().sort().join(',')
+// `extra`: anchors not in the document yet (the path the pen is drawing).
+function ensureScene(exclude: string[], extra: { x: number; y: number }[] = []): SnapScene {
+  const k = exclude.slice().sort().join(',') + '|' + extra.map((p) => `${p.x},${p.y}`).join(';')
   if (snapScene && snapExclude === k) return snapScene
   const skip = new Set(exclude)
   const boxes: Box[] = []
@@ -848,6 +850,7 @@ function ensureScene(exclude: string[]): SnapScene {
     if (b) boxes.push(b)
     if (anchors.length < MAX_ANCHORS) anchors.push(...canvasAnchors(o.id))
   }
+  anchors.push(...extra)
   const artboardBoxes = store.artboards.map((a) => ({ x: a.x, y: a.y, width: a.width, height: a.height }))
   snapScene = buildScene({ boxes, anchors, artboards: artboardBoxes }, snapTol())
   snapExclude = k
@@ -924,13 +927,18 @@ function wireSnapping(r: CanvasRenderer) {
 }
 
 // Snap a free point (pen anchors, shape corners, node drags) and show guides.
-function snapCanvasPoint(p: { x: number; y: number }, ev?: MouseEvent, exclude: string[] = []): { x: number; y: number } {
+function snapCanvasPoint(
+  p: { x: number; y: number },
+  ev?: MouseEvent,
+  exclude: string[] = [],
+  extra: { x: number; y: number }[] = [],
+): { x: number; y: number } {
   const opts = snapOptions(ev)
   if (!renderer || (!opts.points && !opts.guides)) {
     renderer?.hideGuides()
     return p
   }
-  const r = snapPoint(ensureScene(exclude), p, snapTol(), opts)
+  const r = snapPoint(ensureScene(exclude, extra), p, snapTol(), opts)
   renderer.showGuides(r.guides)
   return { x: r.x, y: r.y }
 }
@@ -997,7 +1005,7 @@ function penMouseDown(clientX: number, clientY: number, ev?: MouseEvent) {
   const raw = renderer.screenToCanvas(clientX, clientY)
   const last = penNodes?.[penNodes.length - 1]
   // Shift locks the new segment to horizontal / vertical / 45° (no snapping).
-  const p = ev?.shiftKey && last ? constrainAngle(last, raw) : snapCanvasPoint(raw, ev)
+  const p = ev?.shiftKey && last ? constrainAngle(last, raw) : penSnap(raw, ev)
   renderer.hideGuides()
   // Not drawing yet: clicking an endpoint of an open path continues it.
   if (!penNodes) {
@@ -1174,14 +1182,25 @@ function onStageMouseMove(e: MouseEvent) {
       drawShapeRegions()
     }
   }
-  // While drawing but between anchors (no button down), show a rubber-band from
-  // the last anchor to the cursor.
-  if (store.activeTool === 'pen' && penNodes && !penDraft && renderer) {
+  // Pen hovering (no button down): smart guides show where the next anchor
+  // would land, before the first click too. While drawing, a rubber band runs
+  // from the last anchor to the cursor.
+  if (store.activeTool === 'pen' && !penDraft && !spacePressed.value && renderer) {
     const raw = renderer.screenToCanvas(e.clientX, e.clientY)
-    const last = penNodes[penNodes.length - 1]!
-    const cursor = e.shiftKey ? (renderer.hideGuides(), constrainAngle(last, raw)) : snapCanvasPoint(raw, e)
-    renderer.showPenPreview([...penNodes, { x: cursor.x, y: cursor.y }], penNearStart(cursor))
+    const last = penNodes?.[penNodes.length - 1]
+    const cursor = e.shiftKey && last ? (renderer.hideGuides(), constrainAngle(last, raw)) : penSnap(raw, e)
+    if (penNodes) renderer.showPenPreview([...penNodes, { x: cursor.x, y: cursor.y }], penNearStart(cursor))
   }
+}
+
+// Pen snapping: existing artwork plus the anchors already placed on the path
+// being drawn, so a new anchor can line up with the path's own points.
+function penSnap(raw: { x: number; y: number }, ev?: MouseEvent): { x: number; y: number } {
+  return snapCanvasPoint(raw, ev, [], (penNodes ?? []).map((n) => ({ x: n.x, y: n.y })))
+}
+
+function onStageMouseLeave() {
+  if (store.activeTool === 'pen' && !penDraft) renderer?.hideGuides()
 }
 
 function onStageDblClick(e: MouseEvent) {

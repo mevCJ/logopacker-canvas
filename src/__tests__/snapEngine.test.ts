@@ -80,3 +80,13 @@ describe('snap engine', () => {
     expect([r.dx, r.dy, r.guides.length]).toEqual([98, 99, 0])
   })
 })
+
+describe('anchor alignment', () => {
+  it('aligns a point with an anchor and draws a guide from it', () => {
+    const scene = buildScene({ boxes: [], anchors: [{ x: 50, y: 20 }] }, 6)
+    const r = snapPoint(scene, { x: 53, y: 200 }, 6, { points: true, guides: true })
+    expect(r.x).toBe(50)
+    expect(r.y).toBe(200)
+    expect(r.guides.some((g) => g.kind === 'align' && g.x1 === 50 && g.x2 === 50)).toBe(true)
+  })
+})

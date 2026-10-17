@@ -95,7 +95,13 @@ export function buildScene(
   }
   input.boxes.forEach((b) => addBox(b, false))
   ;(input.artboards ?? []).forEach((b) => addBox(b, true))
-  for (const a of input.anchors ?? []) points.push({ x: a.x, y: a.y, kind: 'anchor' })
+  for (const a of input.anchors ?? []) {
+    points.push({ x: a.x, y: a.y, kind: 'anchor' })
+    // Anchors are alignment references too: a guide runs from the anchor to
+    // whatever lines up with it horizontally or vertically.
+    vlines.push({ pos: a.x, lo: a.y, hi: a.y })
+    hlines.push({ pos: a.y, lo: a.x, hi: a.x })
+  }
   const grid = new Map<string, SnapPt[]>()
   for (const p of points) {
     const k = key(cell, p.x, p.y)
