@@ -1289,7 +1289,14 @@ export class CanvasRenderer {
   }
 
   setViewBox(box: Box): void {
+    const prev = this.getViewBox()
     this.draw.viewbox(box.x, box.y, box.width, box.height)
+    // Overlays are sized in screen pixels; a zoom change redraws them (a pan
+    // doesn't need to). Skipped mid-drag, when the overlay is a live preview.
+    if (Math.abs(prev.width - box.width) > 1e-9 && !this._liveBox && !this._groupStart && !this._liveNodes) {
+      this._redrawSelection()
+      this.setArtboardSelection(this._selectedArtboardId)
+    }
   }
 
   getViewBox(): Box {
@@ -1431,8 +1438,7 @@ export class CanvasRenderer {
     this.handleLayer.clear()
     if (this._selectedObjects.length === 0 || this._chromeHidden) return
 
-    const vb = this.getViewBox()
-    const strokeW = Math.max(1, vb.width / 600)
+    const strokeW = this._px(1.25)
 
     if (this._selectedObjects.length > 1) {
       // Multi-selection: each object's own outline, plus one bounding box
@@ -1584,8 +1590,7 @@ export class CanvasRenderer {
   private _gradientEl: SvgEl | null = null
   showGradientAnnotator(start: { x: number; y: number }, end: { x: number; y: number }): void {
     this.hideGradientAnnotator()
-    const vb = this.getViewBox()
-    const w = Math.max(0.5, vb.width / 600)
+    const w = this._px(1.25)
     const g = this.toolLayer.group().attr({ 'pointer-events': 'none' })
     g.line(start.x, start.y, end.x, end.y).stroke({ color: '#ffffff', width: w * 3, linecap: 'round' })
     g.line(start.x, start.y, end.x, end.y).stroke({ color: '#211A43', width: w, linecap: 'round' })
@@ -1666,6 +1671,12 @@ export class CanvasRenderer {
     const v = Math.max(sc.sx, sc.sy)
     // Unmeasurable canvas (hidden pane, test DOM): assume ~800px across.
     return Number.isFinite(v) && v > 0 ? v : this.getViewBox().width / 800
+  }
+
+  // `n` screen pixels in canvas units: overlay sizes stay constant on screen
+  // at any zoom instead of growing over the artwork when zoomed in.
+  private _px(n: number): number {
+    return n * this.canvasUnitsPerPixel()
   }
 
   // Map points in an object's local/base frame (e.g. path anchors) to canvas
@@ -1946,7 +1957,7 @@ export class CanvasRenderer {
   }
 
   private _handleSize(): number {
-    return Math.max(6, this.getViewBox().width / 90) // handle square size in canvas units
+    return this._px(8) // handle square size: 8 screen pixels
   }
 
   // A box outline turned `rot` degrees about its center.
@@ -2040,7 +2051,7 @@ export class CanvasRenderer {
     }
     this.overlayLayer.clear()
     this.handleLayer.clear()
-    this._framePolygon(frame, frameRot, Math.max(1, this.getViewBox().width / 600))
+    this._framePolygon(frame, frameRot, this._px(1.25))
   }
 
   private _endGroupPreview(): void {
@@ -2324,8 +2335,7 @@ export class CanvasRenderer {
     if (!this._selectedArtboardId) return
     const box = this._artboardBoxes.get(this._selectedArtboardId)
     if (!box) return
-    const vb = this.getViewBox()
-    const strokeW = Math.max(1, vb.width / 500)
+    const strokeW = this._px(1.5)
     const handleLen = strokeW * 2
 
     // Selection outline.
@@ -2737,8 +2747,7 @@ export class CanvasRenderer {
 
   // Draw/update the marquee selection rectangle. Box is in canvas coordinates.
   showMarquee(box: Box): void {
-    const vb = this.getViewBox()
-    const strokeW = Math.max(0.5, vb.width / 900)
+    const strokeW = this._px(1)
     if (!this._marqueeEl) {
       this._marqueeEl = this.toolLayer
         .rect(box.width, box.height)
@@ -2765,8 +2774,7 @@ export class CanvasRenderer {
 
   // Draw/update a live preview of the shape being drawn. Box in canvas coords.
   showShapePreview(type: 'rect' | 'ellipse' | 'line', box: Box): void {
-    const vb = this.getViewBox()
-    const strokeW = Math.max(0.5, vb.width / 700)
+    const strokeW = this._px(1.25)
     this.hideShapePreview()
     if (type === 'line') {
       this._previewEl = this.toolLayer
@@ -2794,8 +2802,7 @@ export class CanvasRenderer {
   private _regionsEl: SvgEl | null = null
   showShapeRegions(regions: { d: string; state: 'idle' | 'hover' | 'merge' | 'erase' }[]): void {
     this.hideShapeRegions()
-    const vb = this.getViewBox()
-    const strokeW = Math.max(0.5, vb.width / 700)
+    const strokeW = this._px(1.25)
     const g = this.toolLayer.group().attr({ 'pointer-events': 'none' })
     const styles = {
       idle: { fill: 'none', opacity: 0 },
@@ -2840,8 +2847,7 @@ export class CanvasRenderer {
   showPenPreview(nodes: PathNode[], nearStart = false): void {
     this.hidePenPreview()
     if (!nodes.length) return
-    const vb = this.getViewBox()
-    const strokeW = Math.max(0.5, vb.width / 700)
+    const strokeW = this._px(1.25)
     const g = this.toolLayer.group().attr({ 'pointer-events': 'none' })
 
     // The Bézier curve through all anchors (nodes are already in canvas coords
@@ -2850,8 +2856,8 @@ export class CanvasRenderer {
       g.path(nodesToPathData(nodes, false)).fill('none').stroke({ color: '#2563eb', width: strokeW })
     }
 
-    const r = Math.max(2, vb.width / 240)
-    const hr = Math.max(1.5, vb.width / 320)
+    const r = this._px(3.5)
+    const hr = this._px(2.5)
     nodes.forEach((n, i) => {
       // Tangent handles (in/out) for smooth anchors: a line to a small dot.
       const drawHandle = (hx?: number, hy?: number) => {

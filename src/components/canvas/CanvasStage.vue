@@ -431,10 +431,20 @@ function fitBoxToView(box: Box, opts: { paddingRatio?: number; animate?: boolean
 
 // --- Interaction: object selection wiring ---------------------------------
 function wireObject(obj: RenderObject, el: any) {
-  // Double-click text with the selection tools to edit it in place.
   el.node.addEventListener('dblclick', (e: MouseEvent) => {
     if (store.activeTool !== 'select' && store.activeTool !== 'node') return
-    if (store.getObject(obj.id)?.type !== 'text') return
+    const o = store.getObject(obj.id)
+    if (!o) return
+    // Selection tool on a grouped object: the first double-click picks that
+    // object out of its group (a click selects the whole group).
+    const alone = store.selectedIds.length === 1 && store.selectedIds[0] === o.id
+    if (store.activeTool === 'select' && o.groupId && !alone) {
+      e.stopPropagation()
+      store.selectObjects([o.id])
+      return
+    }
+    // Double-click text with the selection tools to edit it in place.
+    if (o.type !== 'text') return
     e.stopPropagation()
     startInlineEdit(obj.id)
   })
@@ -1675,6 +1685,56 @@ function moveAndReparent(id: string, dx: number, dy: number) {
   }
 }
 
+// --- Nudge ----------------------------------------------------------------------
+const ARROWS: Record<string, [number, number]> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+}
+// Held or repeated arrow presses share one undo step.
+let lastNudge = 0
+function nudgeSnapshot() {
+  const now = Date.now()
+  if (now - lastNudge > 1000) store.snapshot('Nudge')
+  lastNudge = now
+}
+
+// Move the selection by (dx, dy) canvas units: the selected anchors with
+// Direct Selection, otherwise the selected objects. False when there's
+// nothing to move.
+function nudge(dx: number, dy: number): boolean {
+  const sel = store.activeTool === 'node' ? renderer?.getNodeSelection() : null
+  if (sel) {
+    const o = store.getObject(sel.id)
+    if (!o || o.type !== 'path' || store.isLocked(o)) return false
+    nudgeSnapshot()
+    const path = store.ensurePathNodes(sel.id)
+    if (!path || path.type !== 'path' || !path.nodes) return false
+    // Canvas delta into the path's local frame: undo rotation, then scale.
+    const a = (-(path.rotation || 0) * Math.PI) / 180
+    const lx = (dx * Math.cos(a) - dy * Math.sin(a)) / (path.baseWidth ? path.width / path.baseWidth || 1 : 1)
+    const ly = (dx * Math.sin(a) + dy * Math.cos(a)) / (path.baseHeight ? path.height / path.baseHeight || 1 : 1)
+    const pick = new Set(sel.indices)
+    const shift = (v: number | undefined, d: number) => (v === undefined ? undefined : v + d)
+    const nodes = path.nodes.map((n, i) =>
+      pick.has(i)
+        ? { ...n, x: n.x + lx, y: n.y + ly, inX: shift(n.inX, lx), inY: shift(n.inY, ly), outX: shift(n.outX, lx), outY: shift(n.outY, ly) }
+        : n,
+    )
+    store.updatePathNodes(sel.id, nodes)
+    return true
+  }
+  const ids = store.selectedObjects.filter((o) => !store.isLocked(o)).map((o) => o.id)
+  if (!ids.length) return false
+  nudgeSnapshot()
+  for (const id of ids) {
+    const o = store.getObject(id)!
+    store.moveObject(id, { x: (o.x || 0) + dx, y: (o.y || 0) + dy })
+  }
+  return true
+}
+
 // Node-edit commit: the renderer hands back the reshaped nodes (local frame);
 // snapshot once per drag and persist, which regenerates the path's `d`.
 function onPathNodesChanged(id: string, nodes: PathNode[]) {
@@ -1766,6 +1826,14 @@ function onKeyDown(e: KeyboardEvent) {
     }
     return
   }
+  // Arrow keys nudge the selection 1pt (Shift: 10pt), as in Illustrator.
+  const arrow = ARROWS[e.key]
+  if (arrow && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const step = e.shiftKey ? 10 : 1
+    if (nudge(arrow[0] * step, arrow[1] * step)) e.preventDefault()
+    return
+  }
+
   // Direct Selection: Delete removes the selected anchors, not the object.
   if ((e.key === 'Delete' || e.key === 'Backspace') && store.activeTool === 'node') {
     const sel = renderer?.getNodeSelection()
