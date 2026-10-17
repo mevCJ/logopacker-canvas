@@ -472,3 +472,27 @@ describe('svgEngine — resize + rotation geometry', () => {
     )
   })
 })
+
+import { constrainAngle, reverseNodes } from '@/services/canvas/svgEngine'
+
+describe('pen helpers', () => {
+  it('Shift-constrains to horizontal, vertical or 45°', () => {
+    const o = { x: 10, y: 10 }
+    expect(constrainAngle(o, { x: 110, y: 18 })).toEqual({ x: 110, y: 10 }) // near-horizontal
+    expect(constrainAngle(o, { x: 14, y: 90 })).toEqual({ x: 10, y: 90 }) // near-vertical
+    const d = constrainAngle(o, { x: 60, y: 55 }) // near-diagonal
+    expect(d.x - o.x).toBeCloseTo(d.y - o.y)
+    expect(constrainAngle(o, { x: -50, y: 12 })).toEqual({ x: -50, y: 10 })
+  })
+
+  it('reverses anchors and swaps their handles', () => {
+    const r = reverseNodes([
+      { x: 0, y: 0, outX: 5, outY: 0 },
+      { x: 10, y: 0, inX: 5, inY: 5 },
+    ])
+    expect(r).toEqual([
+      { x: 10, y: 0, inX: undefined, inY: undefined, outX: 5, outY: 5 },
+      { x: 0, y: 0, inX: 5, inY: 0, outX: undefined, outY: undefined },
+    ])
+  })
+})

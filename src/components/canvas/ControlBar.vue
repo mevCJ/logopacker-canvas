@@ -14,12 +14,13 @@
             <span class="cb-swatch-fill" :style="{ background: fillPreview }" />
           </button>
           <div v-if="pop === 'fill'" class="cb-pop" :style="popStyle">
-            <FillControl v-if="single && single.type !== 'image'" :target="single" :swatches="swatches" default-open />
+            <FillControl v-if="single && single.type !== 'image'" :target="single" :swatches="swatches" default-open @picked="pop = null" />
             <ColorPicker
               v-else
               :model-value="multiFill"
               :swatches="swatches"
               default-open
+              @picked="pop = null"
               @begin="store.snapshot('Recolor')"
               @update:model-value="setMultiFill"
             />
@@ -38,6 +39,7 @@
               :model-value="sameValue(paths.map((p) => p.stroke))"
               :swatches="swatches"
               default-open
+              @picked="pop = null"
               @begin="store.snapshot('Recolor')"
               @update:model-value="setStroke"
             />
@@ -127,6 +129,7 @@
             :allow-none="false"
             :swatches="swatches"
             default-open
+            @picked="pop = null"
             @begin="store.snapshot('Edit artboard')"
             @update:model-value="store.setArtboardBackground(artboard.id, $event)"
           />

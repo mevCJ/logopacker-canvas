@@ -39,6 +39,7 @@
       :model-value="stop.color"
       :allow-none="false"
       :swatches="swatches"
+      :canvas-pick="false"
       default-open
       @update:model-value="setColor"
     />

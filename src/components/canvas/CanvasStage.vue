@@ -2,7 +2,7 @@
   <div
     ref="mount"
     class="canvas-stage"
-    :class="[{ panning: isPanning }, `tool-${activeTool}`]"
+    :class="[{ panning: isPanning, 'picking-color': canvasPickActive }, `tool-${activeTool}`]"
     @wheel.prevent="onWheel"
     @mousedown="onMouseDown"
     @mousemove="onStageMouseMove"
@@ -46,6 +46,8 @@ import {
   mergeMarqueeSelection,
   buildShapePayload,
   buildPenNodesPayload,
+  constrainAngle,
+  reverseNodes,
   canvasPointToScreenRect,
   nodesBounds,
   nodesToPathData,
@@ -75,6 +77,8 @@ import { defaultGradient } from '@/services/canvas/gradient'
 import { cssFontFamily, DEFAULT_LINE_HEIGHT } from '@/services/canvas/textLayout'
 import { buildScene, snapEdges, snapMove, snapPoint, type SnapOptions, type SnapScene } from '@/services/canvas/snapEngine'
 import { snapSettings, SNAP_PX } from '@/services/canvas/snapSettings'
+import { sampleColorAt } from '@/services/canvas/colorSampler'
+import { canvasPickActive, deliverCanvasPick } from '@/services/canvas/canvasPick'
 import { flattenSubpaths, parsePathData } from '@/services/canvas/svgToPaths'
 import { isNonePaint } from '@/services/canvas/color'
 
@@ -135,6 +139,9 @@ let penDraft: { anchor: { x: number; y: number }; drag: { x: number; y: number }
   null
 // Close threshold in screen pixels (converted to canvas units at use time).
 const PEN_CLOSE_PX = 12
+// Continuing an existing open path (clicked one of its endpoints): the pen
+// works on that path's anchors and writes the result back to it.
+let penExtend: { id: string; startCount: number } | null = null
 
 // Inline text editing overlay state. While editing, the SVG text is hidden
 // and a transparent textarea drawn in the same font, size, leading, alignment
@@ -400,7 +407,25 @@ function wireObject(obj: RenderObject, el: any) {
     e.stopPropagation()
     startInlineEdit(obj.id)
   })
+  // Direct Selection: hovering a path previews its outline and anchors.
+  // Direct Selection and the Pen preview a path's outline and anchors on
+  // hover; for the pen, an open path's endpoints (click to continue) stand out.
+  el.node.addEventListener('mouseenter', () => {
+    const tool = store.activeTool
+    if ((tool !== 'node' && tool !== 'pen') || spacePressed.value) return
+    const o = store.getObject(obj.id)
+    if (!o || o.type !== 'path' || o.locked) return
+    if (tool === 'node' && store.selectedIds.length === 1 && store.selectedIds[0] === o.id) return
+    if (tool === 'pen' && penExtend?.id === o.id) return
+    renderer?.setHoverObject(o as any, { openEnds: tool === 'pen' && !penNodes && isOpenPath(o) })
+  })
+  el.node.addEventListener('mouseleave', () => renderer?.setHoverObject(null))
   el.node.addEventListener('mousedown', (e: MouseEvent) => {
+    renderer?.setHoverObject(null)
+    // Direct Selection on a path's body selects the path, not its anchors.
+    if (store.activeTool === 'node' && !spacePressed.value && store.getObject(obj.id)?.type === 'path') {
+      renderer?.setNodeSelection(obj.id, [])
+    }
     // Type tool on existing text: edit it right there.
     if (store.activeTool === 'text' && !spacePressed.value && store.getObject(obj.id)?.type === 'text') {
       e.stopPropagation()
@@ -493,6 +518,11 @@ function onMouseDown(e: MouseEvent) {
   cancelViewBoxAnimation()
   const tool = store.activeTool
 
+  if (tool === 'eyedropper' && !spacePressed.value) {
+    eyedropAt(e)
+    return
+  }
+
   // Pen has its own press-drag-release cycle: press places an anchor, dragging
   // pulls its Bézier handles, release commits it. Space still forces panning.
   if (tool === 'pen' && !spacePressed.value) {
@@ -512,12 +542,13 @@ function onMouseDown(e: MouseEvent) {
     tool === 'shapeBuilder' ||
     tool === 'gradient'
 
-  if (!wantPan && (tool === 'select' || tool === 'text' || isShapeTool(tool))) {
+  if (!wantPan && (tool === 'select' || tool === 'node' || tool === 'text' || isShapeTool(tool))) {
     const raw = renderer.screenToCanvas(e.clientX, e.clientY)
+    const marquee = tool === 'select' || tool === 'node'
     // Shapes and text boxes start on a snapped point; the marquee doesn't snap.
-    const p = tool === 'select' ? raw : snapCanvasPoint(raw, e)
+    const p = marquee ? raw : snapCanvasPoint(raw, e)
     toolDrag = {
-      kind: tool === 'select' ? 'marquee' : tool === 'text' ? 'textbox' : 'shape',
+      kind: marquee ? 'marquee' : tool === 'text' ? 'textbox' : 'shape',
       start: p,
       current: p,
       additive: e.shiftKey,
@@ -599,7 +630,9 @@ function onMouseUp(e: MouseEvent) {
     endSnap()
     if (drag.kind === 'marquee') {
       renderer.hideMarquee()
-      if (drag.moved) {
+      if (drag.moved && store.activeTool === 'node') {
+        selectAnchorsInBox(normalizeDragBox(drag.start, drag.current), drag.additive)
+      } else if (drag.moved) {
         const box = normalizeDragBox(drag.start, drag.current)
         const hits = renderer.hitTestBox(box)
         store.selectObjects(mergeMarqueeSelection(store.selectedIds, hits, drag.additive))
@@ -630,6 +663,30 @@ function onMouseUp(e: MouseEvent) {
   panStart = null
 }
 
+// Direct Selection marquee: select the anchors inside the box, on the
+// selected path if it has any there, else the frontmost path that does.
+function selectAnchorsInBox(box: Box, additive: boolean) {
+  if (!renderer) return
+  const inside = (p: { x: number; y: number }) =>
+    p.x >= box.x && p.x <= box.x + box.width && p.y >= box.y && p.y <= box.y + box.height
+  const current = store.selectedIds.length === 1 ? store.selectedIds[0]! : null
+  const candidates = [current, ...[...store.objectOrder].reverse()].filter((id): id is string => !!id)
+  for (const id of candidates) {
+    const o = store.getObject(id)
+    if (!o || o.type !== 'path' || o.hidden || o.locked) continue
+    const hits = renderer
+      .pathAnchorsOnCanvas(o as any)
+      .map((p, i) => (inside(p) ? i : -1))
+      .filter((i) => i >= 0)
+    if (!hits.length) continue
+    const prev = additive && id === current ? renderer.getNodeSelection()?.indices ?? [] : []
+    store.selectObjects([id])
+    renderer.setNodeSelection(id, [...new Set([...prev, ...hits])])
+    return
+  }
+  if (!additive) store.clearSelection()
+}
+
 // Empty-space click behavior for the image tool and the deselect fallback.
 // (The Type tool's click/drag is handled with the shape-style drag.)
 function handleEmptyClick(e: MouseEvent) {
@@ -648,7 +705,7 @@ function handleEmptyClick(e: MouseEvent) {
 let snapScene: SnapScene | null = null
 let snapExclude = ''
 // Anchors cached per object path data, in local coordinates.
-const anchorCache = new Map<string, { d: string; pts: { x: number; y: number }[] }>()
+const anchorCache = new Map<string, { d: string; pts: PathNode[] }>()
 const MAX_ANCHORS = 20000
 
 function snapTol(): number {
@@ -660,17 +717,18 @@ function snapOptions(ev?: MouseEvent): SnapOptions {
   return { points: snapSettings.snapToPoint && !bypass, guides: snapSettings.smartGuides && !bypass }
 }
 
-function localAnchors(o: { id: string; d: string; nodes?: PathNode[] }): { x: number; y: number }[] {
+function localAnchors(o: { id: string; d?: string; nodes?: PathNode[] }): PathNode[] {
   if (o.nodes?.length) return o.nodes
+  const d = o.d || ''
   const cached = anchorCache.get(o.id)
-  if (cached && cached.d === o.d) return cached.pts
-  let pts: { x: number; y: number }[] = []
+  if (cached && cached.d === d) return cached.pts
+  let pts: PathNode[] = []
   try {
-    pts = flattenSubpaths(parsePathData(o.d)).nodes
+    pts = flattenSubpaths(parsePathData(d)).nodes
   } catch {
     /* unparseable path: no anchors */
   }
-  anchorCache.set(o.id, { d: o.d, pts })
+  anchorCache.set(o.id, { d, pts })
   return pts
 }
 
@@ -779,6 +837,41 @@ function snapCanvasPoint(p: { x: number; y: number }, ev?: MouseEvent, exclude: 
   return { x: r.x, y: r.y }
 }
 
+// --- Eyedropper ------------------------------------------------------------------
+// Click a color on the canvas to apply it to the selection's fill (paths and
+// text). Like Illustrator, sampling a gradient-filled object copies the
+// gradient; Shift-click takes just the solid color under the cursor.
+async function eyedropAt(e: MouseEvent) {
+  if (!renderer) return
+  const sample = await sampleColorAt(store, renderer, e.clientX, e.clientY)
+  if (!sample) {
+    toolHint.value = 'Eyedropper: no color there.'
+    return
+  }
+  const targets = store.selectedObjects.filter((o) => o.type !== 'image' && o.id !== sample.sourceId)
+  if (!targets.length) {
+    toolHint.value = `Picked ${sample.color} — select shapes or text first to apply it.`
+    return
+  }
+  store.snapshot('Eyedropper')
+  for (const o of targets) {
+    if (sample.gradient && !e.shiftKey) store.setFillGradient(o.id, sample.gradient)
+    else store.setFill(o.id, sample.color)
+  }
+  toolHint.value = `Applied ${sample.gradient && !e.shiftKey ? 'gradient' : sample.color} to ${targets.length} object${targets.length > 1 ? 's' : ''}.`
+}
+
+// While a color picker is open, a canvas click picks a color for it instead of
+// selecting anything (capture phase, so objects never see the press).
+async function onPickCapture(e: MouseEvent) {
+  if (!canvasPickActive.value || e.button !== 0 || spacePressed.value || !renderer) return
+  if ((e.target as HTMLElement).closest('.inline-text-editor')) return
+  e.stopPropagation()
+  e.preventDefault()
+  const sample = await sampleColorAt(store, renderer, e.clientX, e.clientY)
+  if (sample) deliverCanvasPick(sample.color)
+}
+
 // --- Pen tool: Bézier path builder ---------------------------------------
 // Click for a corner anchor; press-drag to pull symmetric tangent handles for
 // a smooth anchor. Close by clicking near the first anchor; finish an open path
@@ -803,8 +896,19 @@ function penNearStart(p: { x: number; y: number }): boolean {
 
 function penMouseDown(clientX: number, clientY: number, ev?: MouseEvent) {
   if (!renderer) return
-  const p = snapCanvasPoint(renderer.screenToCanvas(clientX, clientY), ev)
+  const raw = renderer.screenToCanvas(clientX, clientY)
+  const last = penNodes?.[penNodes.length - 1]
+  // Shift locks the new segment to horizontal / vertical / 45° (no snapping).
+  const p = ev?.shiftKey && last ? constrainAngle(last, raw) : snapCanvasPoint(raw, ev)
   renderer.hideGuides()
+  // Not drawing yet: clicking an endpoint of an open path continues it.
+  if (!penNodes) {
+    const hit = openEndpointAt(p)
+    if (hit) {
+      startExtend(hit.id, hit.nodes)
+      return
+    }
+  }
   // Clicking near the first anchor of a 2+ node path closes it.
   if (penNearStart(p) && penNodes && penNodes.length >= 2) {
     finishPen(true)
@@ -816,7 +920,9 @@ function penMouseDown(clientX: number, clientY: number, ev?: MouseEvent) {
 // While the mouse is down on a fresh anchor, dragging shapes its handles.
 function onPenDragMove(e: MouseEvent) {
   if (!renderer || !penDraft) return
-  penDraft.drag = renderer.screenToCanvas(e.clientX, e.clientY)
+  const raw = renderer.screenToCanvas(e.clientX, e.clientY)
+  // Shift constrains the handle's angle too.
+  penDraft.drag = e.shiftKey ? constrainAngle(penDraft.anchor, raw) : raw
   const d = penDraft.drag
   if (Math.hypot(d.x - penDraft.anchor.x, d.y - penDraft.anchor.y) > 2) penDraft.moved = true
   renderPenPreview(draftNode())
@@ -863,22 +969,96 @@ function penDraftPoint(): { x: number; y: number } {
   return n ? { x: n.x, y: n.y } : { x: 0, y: 0 }
 }
 
+// Is this path open (one subpath, not closed), so the pen can continue it?
+function isOpenPath(o: { nodes?: PathNode[]; closed?: boolean; subpaths?: number[]; d?: string }): boolean {
+  if (o.nodes?.length) return !o.closed && (o.subpaths?.length ?? 1) <= 1
+  try {
+    const f = flattenSubpaths(parsePathData(o.d || ''))
+    return !f.closed && f.subpaths.length === 1
+  } catch {
+    return false
+  }
+}
+
+// The open path whose first or last anchor is under p (frontmost first). Its
+// canvas-space anchors come back oriented so the clicked end is last.
+function openEndpointAt(p: { x: number; y: number }): { id: string; nodes: PathNode[] } | null {
+  if (!renderer) return null
+  const tol = penDistanceThreshold()
+  for (const id of [...store.objectOrder].reverse()) {
+    const o = store.getObject(id)
+    if (!o || o.type !== 'path' || o.hidden || o.locked || !isOpenPath(o)) continue
+    const nodes = renderer.pathNodesOnCanvas(o as any)
+    if (nodes.length < 2) continue
+    const near = (n: PathNode) => Math.hypot(n.x - p.x, n.y - p.y) <= tol
+    if (near(nodes[nodes.length - 1]!)) return { id, nodes }
+    if (near(nodes[0]!)) return { id, nodes: reverseNodes(nodes) }
+  }
+  return null
+}
+
+function startExtend(id: string, nodes: PathNode[]) {
+  penNodes = nodes
+  penExtend = { id, startCount: nodes.length }
+  store.selectObjects([id])
+  renderer?.setHoverObject(null)
+  renderPenPreview(null)
+  toolHint.value = 'Continuing path — click to add points · click its other end to close · Enter or Esc to finish'
+}
+
+// Write a continued path back to its object. The geometry is rebuilt in
+// artboard space (rotation and scale baked in), so the existing part stays
+// exactly where it was.
+function commitExtend(id: string, nodes: PathNode[], closed: boolean) {
+  const o = store.getObject(id)
+  if (!o || o.type !== 'path') return
+  const ab = o.artboardId ? store.getArtboard(o.artboardId) : null
+  const payload = buildPenNodesPayload(nodes, ab, closed)
+  if (!payload) return
+  const sx = o.baseWidth ? o.width / o.baseWidth : 1
+  const sy = o.baseHeight ? o.height / o.baseHeight : 1
+  store.snapshot(closed ? 'Close path' : 'Extend path')
+  store.updateObject(id, {
+    d: payload.d,
+    nodes: payload.nodes,
+    closed,
+    subpaths: undefined,
+    shape: undefined,
+    cornerRadius: undefined,
+    x: payload.x,
+    y: payload.y,
+    width: payload.width,
+    height: payload.height,
+    baseWidth: payload.width,
+    baseHeight: payload.height,
+    rotation: 0,
+    strokeWidth: (o.strokeWidth || 0) * Math.sqrt(Math.abs(sx * sy)),
+  })
+  store.selectObjects([id])
+}
+
 // Commit the in-progress pen path as a path object, or discard if too short.
 function finishPen(closed: boolean) {
   const nodes = penNodes
+  const extending = penExtend
   penNodes = null
   penDraft = null
+  penExtend = null
   endSnap()
   if (renderer) renderer.hidePenPreview()
-  if (!nodes || nodes.length < 2) return
+  if (toolHint.value.startsWith('Continuing path')) toolHint.value = ''
   // A double-click's first click commits an anchor immediately before finishing,
   // duplicating the last one; drop a coincident trailing corner node.
-  if (nodes.length >= 2) {
+  if (nodes && nodes.length >= 2) {
     const a = nodes[nodes.length - 1]!
     const b = nodes[nodes.length - 2]!
     if (a.x === b.x && a.y === b.y && a.outX === undefined && a.inX === undefined) nodes.pop()
   }
-  if (nodes.length < 2) return
+  if (extending) {
+    if (nodes && (closed || nodes.length > extending.startCount)) commitExtend(extending.id, nodes, closed)
+    return
+  }
+  if (!nodes || nodes.length < 2) return
   const artboard = resolveArtboardAtPoint(store.artboards, nodes[0]!)
   const payload = buildPenNodesPayload(nodes, artboard, closed)
   if (!payload) return
@@ -900,7 +1080,9 @@ function onStageMouseMove(e: MouseEvent) {
   // While drawing but between anchors (no button down), show a rubber-band from
   // the last anchor to the cursor.
   if (store.activeTool === 'pen' && penNodes && !penDraft && renderer) {
-    const cursor = snapCanvasPoint(renderer.screenToCanvas(e.clientX, e.clientY), e)
+    const raw = renderer.screenToCanvas(e.clientX, e.clientY)
+    const last = penNodes[penNodes.length - 1]!
+    const cursor = e.shiftKey ? (renderer.hideGuides(), constrainAngle(last, raw)) : snapCanvasPoint(raw, e)
     renderer.showPenPreview([...penNodes, { x: cursor.x, y: cursor.y }], penNearStart(cursor))
   }
 }
@@ -1377,6 +1559,8 @@ function moveAndReparent(id: string, dx: number, dy: number) {
 // snapshot once per drag and persist, which regenerates the path's `d`.
 function onPathNodesChanged(id: string, nodes: PathNode[]) {
   store.snapshot('Edit nodes')
+  // First edit of a shape/imported path: adopt the derived node model.
+  store.ensurePathNodes(id)
   store.updatePathNodes(id, nodes)
 }
 
@@ -1434,6 +1618,7 @@ function onKeyDown(e: KeyboardEvent) {
       l: 'ellipse',
       '\\': 'line',
       g: 'gradient',
+      i: 'eyedropper',
     }
     const tool = toolKeys[e.key.toLowerCase()]
     if (tool) {
@@ -1449,6 +1634,17 @@ function onKeyDown(e: KeyboardEvent) {
       store.undo()
     }
     return
+  }
+  // Direct Selection: Delete removes the selected anchors, not the object.
+  if ((e.key === 'Delete' || e.key === 'Backspace') && store.activeTool === 'node') {
+    const sel = renderer?.getNodeSelection()
+    if (sel) {
+      e.preventDefault()
+      store.snapshot(sel.indices.length > 1 ? 'Delete anchor points' : 'Delete anchor point')
+      store.deletePathNodes(sel.id, sel.indices)
+      renderer?.setNodeSelection(sel.id, [])
+      return
+    }
   }
   if ((e.key === 'Delete' || e.key === 'Backspace') && store.selectedIds.length) {
     e.preventDefault()
@@ -1480,6 +1676,10 @@ onMounted(() => {
   renderer.onPathNodesChanged = onPathNodesChanged
   renderer.canDragObjects = () => store.activeTool === 'select' && !spacePressed.value
   wireSnapping(renderer)
+  mount.value.addEventListener('mousedown', onPickCapture, true)
+  // Shapes and imported paths without a node model get derived anchors, so
+  // Direct Selection works on every path.
+  renderer.resolveNodes = (obj) => (obj.type === 'path' ? localAnchors(obj) : null)
   // Let the store measure true rendered geometry (e.g. for fit-to-artwork).
   setObjectBoxMeasurer((obj) => (renderer ? renderer.measureObjectBox(obj as any) : null))
   // Let WebMCP tools (which only have the store) drive the viewport.
@@ -1508,6 +1708,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', onPenDragUp)
   window.removeEventListener('mousemove', sbMove)
   window.removeEventListener('mouseup', sbUp)
+  mount.value?.removeEventListener('mousedown', onPickCapture, true)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('paste', handlePaste)
@@ -1581,13 +1782,16 @@ watch(activeTool, () => {
   penNodes = null
   penDraft = null
   endSnap()
+  renderer?.setHoverObject(null)
   if (renderer) renderer.setNodeEditMode(store.activeTool === 'node')
   toolHint.value =
     store.activeTool === 'textPath'
       ? 'Type on a path: click any path to flow text along it.'
       : store.activeTool === 'gradient'
         ? 'Gradient: drag across a selected shape or text to set its direction · click to apply'
-        : ''
+        : store.activeTool === 'eyedropper'
+          ? 'Eyedropper: click a color to apply it to the selection · Shift: just the color under the cursor'
+          : ''
   gradDrag = null
   drawGradientAnnotator()
   // Sets its own hint when the shape builder is armed.
@@ -1633,9 +1837,12 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
 .canvas-stage.tool-gradient {
   cursor: crosshair;
 }
-/* Type on a path: a path is hittable anywhere inside its shape, not only on
-   a thin stroke (locked objects keep their pointer-events="none"). */
-.canvas-stage.tool-textPath :deep(path.canvas-object:not([pointer-events='none'])) {
+/* Type on a path, the pen and Direct Selection: a path is hittable anywhere
+   inside its shape, not only on a thin stroke (locked objects keep their
+   pointer-events="none"). */
+.canvas-stage.tool-textPath :deep(path.canvas-object:not([pointer-events='none'])),
+.canvas-stage.tool-pen :deep(path.canvas-object:not([pointer-events='none'])),
+.canvas-stage.tool-node :deep(path.canvas-object:not([pointer-events='none'])) {
   pointer-events: all;
 }
 .tool-hint {
@@ -1665,6 +1872,11 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
 :deep(svg.outline-mode image.canvas-object) {
   opacity: 0.25 !important;
   filter: grayscale(1);
+}
+.canvas-stage.tool-eyedropper,
+.canvas-stage.picking-color,
+.canvas-stage.picking-color :deep(.canvas-object) {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M19.5 4.5a2.1 2.1 0 00-3 0l-2.3 2.3-1.1-1.1-1.4 1.4 1.1 1.1L5 16v3h3l7.8-7.8 1.1 1.1 1.4-1.4-1.1-1.1 2.3-2.3a2.1 2.1 0 000-3z' fill='white' stroke='%23211a43' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M5 19l-2 2' stroke='%23211a43' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") 2 22, crosshair;
 }
 .canvas-stage.tool-image {
   cursor: copy;

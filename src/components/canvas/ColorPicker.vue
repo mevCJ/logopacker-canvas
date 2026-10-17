@@ -84,15 +84,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { registerCanvasPick } from '@/services/canvas/canvasPick'
 import { formatColor, hsvToRgb, isNonePaint, parseColor, rgbToHsv, toHex, type Hsv } from '@/services/canvas/color'
 
 const props = withDefaults(
-  defineProps<{ modelValue: string; allowNone?: boolean; swatches?: string[]; defaultOpen?: boolean }>(),
-  { allowNone: true, swatches: () => [], defaultOpen: false },
+  defineProps<{
+    modelValue: string
+    allowNone?: boolean
+    swatches?: string[]
+    defaultOpen?: boolean
+    // While open, a click on the canvas picks that color and closes the picker.
+    canvasPick?: boolean
+  }>(),
+  { allowNone: true, swatches: () => [], defaultOpen: false, canvasPick: true },
 )
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
+  // A color was picked from the canvas (the picker has closed itself).
+  (e: 'picked', value: string): void
   // Fired once at the start of each interaction so the host can snapshot undo.
   (e: 'begin'): void
 }>()
@@ -111,6 +121,27 @@ let lastEmitted: string | null = null
 onMounted(() => {
   if (open.value) drawWheel()
 })
+
+// Canvas picking: registered only while this picker is open.
+let unregisterPick: (() => void) | null = null
+watch(
+  open,
+  (isOpen) => {
+    unregisterPick?.()
+    unregisterPick = null
+    if (!isOpen || !props.canvasPick) return
+    unregisterPick = registerCanvasPick((color) => {
+      emit('begin')
+      lastEmitted = null
+      syncFromValue(color)
+      emitValue(color)
+      open.value = false
+      emit('picked', color)
+    })
+  },
+  { immediate: true },
+)
+onBeforeUnmount(() => unregisterPick?.())
 
 const isNone = computed(() => props.modelValue !== '' && isNonePaint(props.modelValue))
 

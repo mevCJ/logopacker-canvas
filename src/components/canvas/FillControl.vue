@@ -19,6 +19,7 @@
       :model-value="target.fill"
       :swatches="swatches"
       :default-open="defaultOpen"
+      @picked="emit('picked')"
       @begin="store.snapshot('Recolor')"
       @update:model-value="store.setFill(target.id, $event)"
     />
@@ -47,6 +48,7 @@ const props = withDefaults(
 )
 
 const store = useCanvasStore()
+const emit = defineEmits<{ (e: 'picked'): void }>()
 
 type FillMode = 'solid' | 'linear' | 'radial'
 const FILL_MODES: { id: FillMode; label: string }[] = [

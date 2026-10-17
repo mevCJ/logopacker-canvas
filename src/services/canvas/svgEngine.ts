@@ -828,6 +828,32 @@ export function buildPenNodesPayload(
   }
 }
 
+// Shift-constrain a point to the nearest 45° direction from `from` (Illustrator
+// pen/line behavior: horizontal, vertical or diagonal), keeping the distance
+// measured along that direction.
+export function constrainAngle(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  stepDeg = 45,
+): { x: number; y: number } {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  if (!dx && !dy) return { ...to }
+  const step = (stepDeg * Math.PI) / 180
+  const a = Math.round(Math.atan2(dy, dx) / step) * step
+  const cos = Math.cos(a)
+  const sin = Math.sin(a)
+  const len = dx * cos + dy * sin
+  const r = (n: number) => (Math.abs(n) < 1e-9 ? 0 : n)
+  return { x: from.x + r(len * cos), y: from.y + r(len * sin) }
+}
+
+// Reverse a run of anchors (so its last anchor becomes its first), swapping
+// each anchor's in/out handles so the curve is unchanged.
+export function reverseNodes(nodes: PathNode[]): PathNode[] {
+  return [...nodes].reverse().map((n) => ({ x: n.x, y: n.y, inX: n.outX, inY: n.outY, outX: n.inX, outY: n.inY }))
+}
+
 export function documentBounds(artboards: RenderArtboard[] | undefined, padding = 200): Box {
   if (!artboards || artboards.length === 0) {
     return { x: 0, y: 0, width: 1000, height: 700 }
@@ -914,6 +940,7 @@ export class CanvasRenderer {
   objectLayer: SvgEl
   overlayLayer: SvgEl
   handleLayer: SvgEl
+  hoverLayer: SvgEl
   artboardOverlayLayer: SvgEl
   ghostLayer: SvgEl
   toolLayer: SvgEl
@@ -969,6 +996,8 @@ export class CanvasRenderer {
     // Interactive resize/rotate handles for the selected object. Separate from
     // overlayLayer because those outlines are pointer-events:none.
     this.handleLayer = this.draw.group().addClass('handle-layer')
+    // Direct Selection hover preview (outline + anchors), never interactive.
+    this.hoverLayer = this.draw.group().addClass('hover-layer').attr({ 'pointer-events': 'none' })
     // Overlay dedicated to artboard selection outline + resize handles. Kept
     // above the object overlay so its handles stay clickable.
     this.artboardOverlayLayer = this.draw.group().addClass('artboard-overlay-layer')
@@ -1048,6 +1077,11 @@ export class CanvasRenderer {
       else el.removeClass('is-selected')
     }
     this._selectedObjects = objects.filter((o) => set.has(o.id))
+    // Selecting a different object drops the anchor selection.
+    if (this._nodeSelId && !(ids.length === 1 && ids[0] === this._nodeSelId)) {
+      this._nodeSelId = null
+      this._nodeSel = new Set()
+    }
     this._liveBox = null
     this._liveNodes = null
     this._redrawSelection()
@@ -1159,7 +1193,7 @@ export class CanvasRenderer {
     const obj = this._selectedObjects[0]!
     // Node-edit mode: a node-based path shows anchors + handles instead of the
     // transform box. Falls through to normal handles for other objects.
-    if (this._nodeEditMode && obj.type === 'path' && (this._liveNodes || obj.nodes)) {
+    if (this._nodeEditMode && obj.type === 'path' && this._editNodes(obj).length) {
       this._drawNodeEditor(obj, strokeW)
       return
     }
@@ -1230,8 +1264,7 @@ export class CanvasRenderer {
     this.guideLayer.clear()
     if (!guides.length && !readout) return
     // Canvas units per screen pixel (the SVG letterboxes, so use the larger).
-    const sc = this._canvasScale()
-    const px = Math.max(sc.sx, sc.sy) || 1
+    const px = this.canvasUnitsPerPixel()
     const color = '#d6249f'
     const w = px
     const label = (x: number, y: number, text: string, bg: string) => {
@@ -1292,7 +1325,9 @@ export class CanvasRenderer {
   // Canvas units per screen pixel at the current zoom.
   canvasUnitsPerPixel(): number {
     const sc = this._canvasScale()
-    return Math.max(sc.sx, sc.sy) || 1
+    const v = Math.max(sc.sx, sc.sy)
+    // Unmeasurable canvas (hidden pane, test DOM): assume ~800px across.
+    return Number.isFinite(v) && v > 0 ? v : this.getViewBox().width / 800
   }
 
   // Map points in an object's local/base frame (e.g. path anchors) to canvas
@@ -1323,58 +1358,143 @@ export class CanvasRenderer {
   // wire pointer drags that reshape it. Node coords are local; every drawn
   // point is mapped to canvas space via the element CTM so the overlay tracks
   // the path through any rotation/scale.
-  private _drawNodeEditor(obj: RenderObject, strokeW: number): void {
+  // Editable anchors for a path: its node model, or one derived from its
+  // path data by the host (shapes and imported paths without nodes).
+  resolveNodes: ((obj: RenderObject) => PathNode[] | null) | null = null
+  private _editNodes(obj: RenderObject): PathNode[] {
+    return this._liveNodes || obj.nodes || this.resolveNodes?.(obj) || []
+  }
+
+  // Direct Selection state: which anchors of which path are selected.
+  private _nodeSelId: string | null = null
+  private _nodeSel = new Set<number>()
+
+  getNodeSelection(): { id: string; indices: number[] } | null {
+    if (!this._nodeSelId || !this._nodeSel.size) return null
+    return { id: this._nodeSelId, indices: [...this._nodeSel].sort((a, b) => a - b) }
+  }
+
+  setNodeSelection(id: string | null, indices: number[] = []): void {
+    this._nodeSelId = id
+    this._nodeSel = new Set(indices)
+    this._redrawSelection()
+  }
+
+  // Anchor positions of a path in canvas space (for marquee hit-testing).
+  pathAnchorsOnCanvas(obj: RenderObject): { x: number; y: number }[] {
+    const t = this._objectTransformParams(obj)
+    return this._editNodes(obj).map((n) => nodePointToCanvas(n, t))
+  }
+
+  // A path's anchors with their Bézier handles, in canvas space.
+  pathNodesOnCanvas(obj: RenderObject): PathNode[] {
+    const t = this._objectTransformParams(obj)
+    return this._editNodes(obj).map((n) => {
+      const a = nodePointToCanvas(n, t)
+      const out: PathNode = { x: a.x, y: a.y }
+      if (n.inX !== undefined && n.inY !== undefined) {
+        const h = nodePointToCanvas({ x: n.inX, y: n.inY }, t)
+        out.inX = h.x
+        out.inY = h.y
+      }
+      if (n.outX !== undefined && n.outY !== undefined) {
+        const h = nodePointToCanvas({ x: n.outX, y: n.outY }, t)
+        out.outX = h.x
+        out.outY = h.y
+      }
+      return out
+    })
+  }
+
+  // Thin highlight of a path's outline, drawn with the object's own transform.
+  private _outline(layer: SvgEl, obj: RenderObject, strokeW: number, d?: string): void {
     const el = this._objectEls.get(obj.id)
-    const nodes = this._liveNodes || obj.nodes || []
+    if (!el) return
+    layer
+      .path(d ?? (el.attr('d') as string))
+      .attr({ transform: el.attr('transform'), 'pointer-events': 'none', 'vector-effect': 'non-scaling-stroke' })
+      .fill('none')
+      .stroke({ color: '#2563eb', width: strokeW / (this.canvasUnitsPerPixel() || 1) })
+  }
+
+  // Hover preview (Direct Selection): outline + hollow anchors of the path
+  // under the pointer, without selecting it.
+  // `openEnds`: for the pen, mark the two endpoints of an open path (where
+  // clicking continues it) as larger solid squares.
+  setHoverObject(obj: RenderObject | null, opts: { openEnds?: boolean } = {}): void {
+    this.hoverLayer.clear()
+    if (!obj || obj.type !== 'path') return
+    const nodes = this._editNodes(obj)
+    if (!nodes.length) return
+    const px = this.canvasUnitsPerPixel()
+    this._outline(this.hoverLayer, obj, px)
+    const t = this._objectTransformParams(obj)
+    const r = 3 * px
+    nodes.forEach((n, i) => {
+      const a = nodePointToCanvas(n, t)
+      const end = opts.openEnds && (i === 0 || i === nodes.length - 1)
+      const rr = end ? r * 1.4 : r
+      this.hoverLayer
+        .rect(rr * 2, rr * 2)
+        .center(a.x, a.y)
+        .fill(end ? '#2563eb' : '#ffffff')
+        .stroke({ color: '#2563eb', width: px })
+    })
+  }
+
+  private _drawNodeEditor(obj: RenderObject, _strokeW: number): void {
+    const el = this._objectEls.get(obj.id)
+    const nodes = this._editNodes(obj)
     if (!el || !nodes.length) return
-    const vb = this.getViewBox()
-    // Size the handles in fixed screen pixels (converted to canvas units via
-    // the current pixel scale) so they stay a small, constant size on screen at
-    // any zoom. Fall back to a viewBox fraction when the pixel scale isn't
-    // measurable (non-DOM/test environments where getBoundingClientRect is 0).
-    const { sx } = this._canvasScale()
-    const perPx = Number.isFinite(sx) && sx > 0 ? sx : vb.width / 800
+    // Anchor selection only applies to the path it was made on.
+    const sel = this._nodeSelId === obj.id ? this._nodeSel : new Set<number>()
+    // Sizes in screen pixels so handles stay small and constant at any zoom.
+    const perPx = this.canvasUnitsPerPixel()
     const r = 3.5 * perPx // anchor square half-size (~7px on screen)
     const hr = 2.5 * perPx // tangent-handle dot half-size (~5px on screen)
-    // Outline stroke in screen pixels too, so it stays proportional to the
-    // (now pixel-sized) handles rather than the passed viewBox-based width.
-    strokeW = perPx
+    const strokeW = perPx
     const t = this._objectTransformParams(obj)
+
+    this._outline(this.overlayLayer, obj, strokeW)
 
     nodes.forEach((n, i) => {
       const a = nodePointToCanvas({ x: n.x, y: n.y }, t)
-      // Tangent handles: line from anchor to handle + a draggable dot.
-      const drawHandle = (kind: 'in' | 'out', hx?: number, hy?: number) => {
-        if (hx === undefined || hy === undefined) return
-        const hp = nodePointToCanvas({ x: hx, y: hy }, t)
-        this.overlayLayer
-          .line(a.x, a.y, hp.x, hp.y)
-          .stroke({ color: '#2563eb', width: strokeW })
-          .attr({ 'pointer-events': 'none' })
-        const dot = this.handleLayer
-          .circle(hr * 2)
-          .center(hp.x, hp.y)
-          .fill('#2563eb')
-          .stroke({ color: '#ffffff', width: strokeW })
-          .css('cursor', 'move')
-        this._wireNodeDrag(obj.id, i, kind)(dot)
+      const selected = sel.has(i)
+      // Illustrator shows Bézier handles only for selected anchors.
+      if (selected) {
+        const drawHandle = (kind: 'in' | 'out', hx?: number, hy?: number) => {
+          if (hx === undefined || hy === undefined) return
+          const hp = nodePointToCanvas({ x: hx, y: hy }, t)
+          this.overlayLayer
+            .line(a.x, a.y, hp.x, hp.y)
+            .stroke({ color: '#2563eb', width: strokeW })
+            .attr({ 'pointer-events': 'none' })
+          const dot = this.handleLayer
+            .circle(hr * 2)
+            .center(hp.x, hp.y)
+            .fill('#2563eb')
+            .stroke({ color: '#ffffff', width: strokeW })
+            .css('cursor', 'move')
+          this._wireNodeDrag(obj.id, i, kind)(dot)
+        }
+        drawHandle('in', n.inX, n.inY)
+        drawHandle('out', n.outX, n.outY)
       }
-      drawHandle('in', n.inX, n.inY)
-      drawHandle('out', n.outX, n.outY)
-      // Anchor square (drawn last so it sits above the handle lines).
+      // Anchor square: hollow when unselected, solid when selected.
       const sq = this.handleLayer
         .rect(r * 2, r * 2)
         .center(a.x, a.y)
-        .fill('#ffffff')
+        .fill(selected ? '#2563eb' : '#ffffff')
         .stroke({ color: '#2563eb', width: strokeW })
         .css('cursor', 'move')
       this._wireNodeDrag(obj.id, i, 'anchor')(sq)
     })
   }
 
-  // Wire a drag on an anchor square or a tangent-handle dot. Dragging an anchor
-  // moves it and its handles together; dragging a handle moves just that
-  // control point (its mirror is kept symmetric for a smooth feel). Commits via
+  // Wire a drag on an anchor square or a tangent-handle dot. Pressing an
+  // anchor selects it (Shift toggles it in/out of the selection); dragging
+  // moves every selected anchor together. Dragging a handle moves just that
+  // control point (its mirror stays symmetric). Commits via
   // onPathNodesChanged on release.
   private _wireNodeDrag(id: string, index: number, kind: 'anchor' | 'in' | 'out') {
     return (el: SvgEl) => {
@@ -1385,24 +1505,52 @@ export class CanvasRenderer {
         const obj = this._selectedObjects.find((o) => o.id === id)
         const objEl = this._objectEls.get(id)
         if (!obj || obj.type !== 'path' || !objEl) return
-        const base = (obj.nodes || []).map((n) => ({ ...n }))
+        const base = this._editNodes(obj).map((n) => ({ ...n }))
+
+        // Selection on press.
+        let collapseOnClick = false
+        if (this._nodeSelId !== id) {
+          this._nodeSelId = id
+          this._nodeSel = new Set()
+        }
+        if (kind === 'anchor') {
+          if (e.shiftKey) {
+            if (this._nodeSel.has(index)) this._nodeSel.delete(index)
+            else this._nodeSel.add(index)
+          } else if (!this._nodeSel.has(index)) {
+            this._nodeSel = new Set([index])
+          } else {
+            // Pressing an already-selected anchor keeps the group for a drag;
+            // a click without movement narrows to just this anchor.
+            collapseOnClick = this._nodeSel.size > 1
+          }
+          this._nodeSelId = id
+          this._redrawSelection()
+          if (e.shiftKey && !this._nodeSel.has(index)) return
+        }
+        const moving = kind === 'anchor' ? [...this._nodeSel] : [index]
+
         const t = this._objectTransformParams(obj)
         const startCanvas = this.screenToCanvas(e.clientX, e.clientY)
         const startLocal = canvasPointToNode(startCanvas, t)
         const anchorCanvas = base[index] ? nodePointToCanvas(base[index]!, t) : null
+        let moved = false
         const onMove = (ev: MouseEvent) => {
           const cur = this.screenToCanvas(ev.clientX, ev.clientY)
           let curLocal = canvasPointToNode(cur, t)
           let dx = curLocal.x - startLocal.x
           let dy = curLocal.y - startLocal.y
-          // Anchors snap where they would land (handles move freely).
+          // The grabbed anchor snaps where it would land; the rest follow.
           if (kind === 'anchor' && anchorCanvas && this.snapNodePoint) {
             const target = { x: anchorCanvas.x + cur.x - startCanvas.x, y: anchorCanvas.y + cur.y - startCanvas.y }
             curLocal = canvasPointToNode(this.snapNodePoint(id, target, ev), t)
             dx = curLocal.x - base[index]!.x
             dy = curLocal.y - base[index]!.y
           }
-          this._liveNodes = applyNodeDrag(base, index, kind, dx, dy)
+          if (Math.abs(dx) + Math.abs(dy) > 0) moved = true
+          let next = base
+          for (const i of moving) next = applyNodeDrag(next, i, kind, dx, dy)
+          this._liveNodes = next
           this._applyLivePath(objEl, obj)
           this._redrawSelection()
         }
@@ -1412,9 +1560,10 @@ export class CanvasRenderer {
           this.onSnapEnd?.()
           const next = this._liveNodes
           this._liveNodes = null
-          if (next && typeof this.onPathNodesChanged === 'function') {
+          if (moved && next && typeof this.onPathNodesChanged === 'function') {
             this.onPathNodesChanged(id, next)
           } else {
+            if (collapseOnClick) this._nodeSel = new Set([index])
             this._redrawSelection()
           }
         }

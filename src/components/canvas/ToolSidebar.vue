@@ -117,6 +117,18 @@ const SECTIONS: ToolGroup[][] = [
       ],
     },
     {
+      id: 'eyedropper',
+      label: 'Eyedropper',
+      tools: [
+        {
+          id: 'eyedropper',
+          label: 'Eyedropper',
+          key: 'I',
+          icon: '<path d="M19.5 4.5a2.1 2.1 0 00-3 0l-2.3 2.3-1.1-1.1-1.4 1.4 1.1 1.1L5 16v3h3l7.8-7.8 1.1 1.1 1.4-1.4-1.1-1.1 2.3-2.3a2.1 2.1 0 000-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+        },
+      ],
+    },
+    {
       id: 'gradient',
       label: 'Gradient',
       tools: [

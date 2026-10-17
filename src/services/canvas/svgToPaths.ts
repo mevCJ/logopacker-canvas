@@ -117,6 +117,18 @@ export function parsePathData(d: string, transforms: string[] = []): Subpath[] {
       case 'Z':
       case 'z': {
         closed = true
+        // A closing point that repeats the start (arcs, many exporters) would
+        // show up as two stacked anchors. Fold it into the first anchor,
+        // keeping its incoming handle so the closing curve is unchanged.
+        const first = nodes[0]
+        const last = nodes[nodes.length - 1]
+        if (first && last && nodes.length > 2 && Math.abs(first.x - last.x) < 1e-6 && Math.abs(first.y - last.y) < 1e-6) {
+          if (last.inX !== undefined && last.inY !== undefined) {
+            first.inX = last.inX
+            first.inY = last.inY
+          }
+          nodes.pop()
+        }
         break
       }
       // After abs().unshort().unarc() the remaining commands are M/L/H/V/C/Q/Z

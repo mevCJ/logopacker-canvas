@@ -5,6 +5,7 @@ import { defineStore } from 'pinia'
 import { rectPathData, rotatePoint, nodesToPathData, nodesBounds } from '@/services/canvas/svgEngine'
 import type { Box, PathNode } from '@/services/canvas/svgEngine'
 import type { GradientFill } from '@/services/canvas/gradient'
+import { flattenSubpaths, parsePathData } from '@/services/canvas/svgToPaths'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,6 +43,7 @@ export const TOOL_IDS = [
   'image',
   'shapeBuilder',
   'gradient',
+  'eyedropper',
 ] as const
 export type ToolId = (typeof TOOL_IDS)[number]
 
@@ -893,6 +895,10 @@ export const useCanvasStore = defineStore('canvas', {
       const obj = this.objects[id]
       if (!obj || obj.type !== 'path') return null
       const b = nodesBounds(nodes)
+      // Keep the object's current display scale: node coords are in the base
+      // frame, so a resized path must stay resized after its nodes change.
+      const sx = obj.baseWidth ? obj.width / obj.baseWidth : 1
+      const sy = obj.baseHeight ? obj.height / obj.baseHeight : 1
       obj.nodes = nodes
       // A node-edit drag moves anchors but not the subpath structure, so keep
       // the object's existing subpaths unless the caller passes a new layout.
@@ -900,11 +906,57 @@ export const useCanvasStore = defineStore('canvas', {
       obj.d = nodesToPathData(nodes, !!obj.closed, obj.subpaths)
       // Bounds drive the selection box + resize scale; the node coords are kept
       // in the existing frame (may extend past the origin), so d stays aligned.
-      obj.width = b.width
-      obj.height = b.height
+      obj.width = b.width * sx
+      obj.height = b.height * sy
       obj.baseWidth = b.width
       obj.baseHeight = b.height
       return obj
+    },
+
+    // Give a path an editable node model when it only has path data (shapes,
+    // boolean results without nodes, hand-written `d`). The geometry is
+    // unchanged; a shape stops being a live rectangle/ellipse primitive.
+    ensurePathNodes(id: string): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj || obj.type !== 'path') return null
+      if (obj.nodes?.length) return obj
+      const { nodes, subpaths, closed } = flattenSubpaths(parsePathData(obj.d || ''))
+      if (nodes.length < 2) return null
+      obj.nodes = nodes
+      obj.subpaths = subpaths.length > 1 ? subpaths : undefined
+      obj.closed = closed
+      obj.d = nodesToPathData(nodes, closed, obj.subpaths)
+      delete obj.shape
+      delete obj.cornerRadius
+      return obj
+    },
+
+    // Delete anchors (Direct Selection + Delete). Neighbors are joined so the
+    // path stays continuous; a subpath left with fewer than two anchors is
+    // dropped, and a path with nothing left is deleted (returns null).
+    deletePathNodes(id: string, indices: number[]): CanvasObject | null {
+      const obj = this.ensurePathNodes(id)
+      if (!obj || obj.type !== 'path' || !obj.nodes) return obj
+      const drop = new Set(indices)
+      const counts = obj.subpaths?.length ? obj.subpaths : [obj.nodes.length]
+      const nodes: PathNode[] = []
+      const nextCounts: number[] = []
+      let i = 0
+      for (const count of counts) {
+        const kept = obj.nodes.slice(i, i + count).filter((_, k) => !drop.has(i + k))
+        i += count
+        if (kept.length >= 2) {
+          nodes.push(...kept)
+          nextCounts.push(kept.length)
+        }
+      }
+      if (nodes.length < 2) {
+        this.removeObject(id)
+        return null
+      }
+      if (nextCounts.length > 1) return this.updatePathNodes(id, nodes, nextCounts)
+      obj.subpaths = undefined
+      return this.updatePathNodes(id, nodes)
     },
 
     // Set a rectangle's corner radius and regenerate its path data. Radius is in
