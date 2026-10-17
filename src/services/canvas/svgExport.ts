@@ -7,6 +7,7 @@
 // actual file download live in exportService.ts.
 import {
   absolutePosition,
+  axisScale,
   pathAttrs,
   textAttrs,
   imageAttrs,
@@ -79,12 +80,10 @@ export function objectSvgMarkup(
   const rot = obj.rotation || 0
   const dispW = obj.width || 0
   const dispH = obj.height || 0
-  const baseW = obj.baseWidth || dispW || 1
-  const baseH = obj.baseHeight || dispH || 1
 
   if (obj.type === 'path') {
-    const sx = baseW ? dispW / baseW : 1
-    const sy = baseH ? dispH / baseH : 1
+    const sx = axisScale(dispW, obj.baseWidth)
+    const sy = axisScale(dispH, obj.baseHeight)
     const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy)
     const attrs = serializeAttrs({ ...pathAttrs(obj), transform })
     return `<path${attrs} />`
@@ -124,8 +123,8 @@ export function objectSvgMarkup(
   }
 
   // image
-  const sx = baseW ? dispW / baseW : 1
-  const sy = baseH ? dispH / baseH : 1
+  const sx = axisScale(dispW, obj.baseWidth)
+  const sy = axisScale(dispH, obj.baseHeight)
   const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy)
   const attrs = serializeAttrs({ ...imageAttrs(obj), x: 0, y: 0, transform })
   return `<image${attrs} />`

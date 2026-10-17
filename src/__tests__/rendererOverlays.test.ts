@@ -197,7 +197,7 @@ describe('CanvasRenderer — tool overlays', () => {
     expect(w).toBeLessThan(15)
   })
 
-  it('draws no handles for a multi-selection', () => {
+  it('draws one transform box with scale and rotate handles for a multi-selection', () => {
     const a = { id: 'a', type: 'path' as const, artboardId: 'ab', x: 0, y: 0, width: 50, height: 50, baseWidth: 50, baseHeight: 50, rotation: 0, d: 'M0 0 H50 V50 H0 Z', fill: '#000' }
     const b = { id: 'b', type: 'path' as const, artboardId: 'ab', x: 80, y: 0, width: 50, height: 50, baseWidth: 50, baseHeight: 50, rotation: 0, d: 'M0 0 H50 V50 H0 Z', fill: '#000' }
     renderer.render({
@@ -206,7 +206,8 @@ describe('CanvasRenderer — tool overlays', () => {
       objectOrder: ['a', 'b'],
     })
     renderer.setSelection(['a', 'b'], [a, b])
-    expect(host.querySelectorAll('.handle-layer [data-handle]').length).toBe(0)
+    expect(host.querySelectorAll('.handle-layer rect[data-handle]').length).toBe(8)
+    expect(host.querySelectorAll('.handle-layer [data-handle="rotate"]').length).toBe(1)
   })
 
   it('clears handles when the selection is emptied', () => {

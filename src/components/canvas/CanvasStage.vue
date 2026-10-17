@@ -47,12 +47,16 @@ import {
   buildShapePayload,
   buildPenNodesPayload,
   constrainAngle,
+  constrainSquare,
+  pathCorners,
   reverseNodes,
   canvasPointToScreenRect,
   nodesBounds,
   nodesToPathData,
   translateNodes,
   type Box,
+  type GroupTransformPatch,
+  type PathCorner,
   type PathNode,
   type RenderObject,
 } from '@/services/canvas/svgEngine'
@@ -72,7 +76,7 @@ import {
   textPathGeometry,
   type ShapeRegion,
 } from '@/services/canvas/pathBoolean'
-import type { PathObject } from '@/stores/canvas'
+import type { CanvasObject, PathObject } from '@/stores/canvas'
 import { defaultGradient } from '@/services/canvas/gradient'
 import { cssFontFamily, DEFAULT_LINE_HEIGHT } from '@/services/canvas/textLayout'
 import { buildScene, snapEdges, snapMove, snapPoint, type SnapOptions, type SnapScene } from '@/services/canvas/snapEngine'
@@ -313,6 +317,31 @@ function onObjectRotated(id: string, degrees: number) {
   store.rotateObject(id, degrees)
 }
 
+// A multi-selection scaled or rotated as one: every object moves (and, when
+// scaling, resizes) together in a single undo step.
+function onObjectsTransformed(patches: GroupTransformPatch[], kind: 'scale' | 'rotate') {
+  store.snapshot(kind === 'rotate' ? 'Rotate' : 'Scale')
+  for (const p of patches) {
+    const obj = store.getObject(p.id)
+    if (!obj) continue
+    const patch: Record<string, unknown> = { x: p.x, y: p.y, rotation: p.rotation }
+    if (kind === 'scale') {
+      if (obj.type === 'text') {
+        // Type keeps crisp glyphs: its font size scales, and an area box
+        // stretches with the selection.
+        patch.fontSize = Math.max(1, Math.round((obj.fontSize || 24) * p.scale * 100) / 100)
+        const min = obj.area ? 10 : 0
+        patch.width = Math.max(min, p.width)
+        patch.height = Math.max(min, p.height)
+      } else {
+        patch.width = Math.max(1, p.width)
+        patch.height = Math.max(1, p.height)
+      }
+    }
+    store.updateObject(p.id, patch)
+  }
+}
+
 // Recompute the document bounds used for zoom clamping. Does NOT touch the
 // viewBox, so the user's/agent's current zoom & pan are preserved when the
 // document changes (objects added, artboards moved, etc.).
@@ -498,14 +527,30 @@ function onArtboardResized(
 }
 
 // --- Interaction: zoom (wheel) --------------------------------------------
+// Two-finger scrolling (and the mouse wheel) pans, as in Illustrator; a
+// trackpad pinch (sent as Ctrl+wheel) or Cmd/Ctrl/Alt+wheel zooms at the pointer.
 function onWheel(e: WheelEvent) {
   if (!renderer) return
   cancelViewBoxAnimation()
-  const focal = renderer.screenToCanvas(e.clientX, e.clientY)
-  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
-  let box = zoomViewBox(renderer.getViewBox(), factor, focal)
-  box = clampZoom(box, baseBounds)
-  renderer.setViewBox(box)
+  // Lines/pages → pixels for wheels that report in those units.
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1
+  if (e.ctrlKey || e.metaKey || e.altKey) {
+    const focal = renderer.screenToCanvas(e.clientX, e.clientY)
+    const dy = Math.max(-30, Math.min(30, e.deltaY * unit))
+    let box = zoomViewBox(renderer.getViewBox(), Math.exp(-dy * 0.01), focal)
+    box = clampZoom(box, baseBounds)
+    renderer.setViewBox(box)
+    return
+  }
+  let dx = e.deltaX * unit
+  let dy = e.deltaY * unit
+  // Shift+wheel scrolls sideways on mice that only have a vertical wheel.
+  if (e.shiftKey && !dx) {
+    dx = dy
+    dy = 0
+  }
+  const px = renderer.canvasUnitsPerPixel()
+  renderer.setViewBox(panViewBox(renderer.getViewBox(), -dx * px, -dy * px))
 }
 
 // --- Interaction: empty-space mousedown dispatches by active tool ---------
@@ -576,6 +621,13 @@ function onMouseMove(e: MouseEvent) {
   if (toolDrag) {
     const raw = renderer.screenToCanvas(e.clientX, e.clientY)
     toolDrag.current = toolDrag.kind === 'marquee' ? raw : snapCanvasPoint(raw, e)
+    // Shift keeps shapes (and text boxes) square and lines at 45° steps.
+    if (toolDrag.kind !== 'marquee' && e.shiftKey) {
+      toolDrag.current =
+        store.activeTool === 'line'
+          ? constrainAngle(toolDrag.start, toolDrag.current)
+          : constrainSquare(toolDrag.start, toolDrag.current)
+    }
     if (toolDrag.kind !== 'marquee' && snapSettings.smartGuides) {
       const b = normalizeDragBox(toolDrag.start, toolDrag.current)
       // Keep the snap guides and add a size readout.
@@ -730,6 +782,46 @@ function localAnchors(o: { id: string; d?: string; nodes?: PathNode[] }): PathNo
   }
   anchorCache.set(o.id, { d, pts })
   return pts
+}
+
+// Live corners of a path (local frame) and its radius. A rectangle's corners
+// are its box corners; other paths use their sharp node corners. Ellipses
+// and lines have none.
+function liveCorners(o: CanvasObject): { corners: PathCorner[]; radius: number } | null {
+  if (o.type !== 'path' || o.shape === 'ellipse' || o.shape === 'line') return null
+  const radius = o.cornerRadius || 0
+  if (o.shape === 'rect') {
+    const w = o.baseWidth
+    const h = o.baseHeight
+    const box = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }]
+    return { corners: pathCorners(box, true), radius }
+  }
+  if (o.nodes?.length) return { corners: pathCorners(o.nodes, !!o.closed, o.subpaths), radius }
+  try {
+    const f = flattenSubpaths(parsePathData(o.d || ''))
+    return { corners: pathCorners(f.nodes, f.closed, f.subpaths), radius }
+  } catch {
+    return null
+  }
+}
+
+// Corner widget drag: one undo step for the whole drag, radius clamped to
+// the roundest any corner can get.
+let cornerDragSnapped = false
+function onCornerRadiusDrag(id: string, radius: number, phase: 'start' | 'move' | 'end') {
+  if (phase !== 'move') {
+    cornerDragSnapped = false
+    return
+  }
+  const o = store.getObject(id)
+  const info = o ? liveCorners(o) : null
+  if (!info?.corners.length) return
+  if (!cornerDragSnapped) {
+    store.snapshot('Corner radius')
+    cornerDragSnapped = true
+  }
+  const max = Math.max(...info.corners.map((c) => c.maxRadius))
+  store.setCornerRadius(id, Math.round(Math.min(radius, max) * 100) / 100)
 }
 
 function canvasAnchors(id: string): { x: number; y: number }[] {
@@ -1606,6 +1698,17 @@ function onKeyDown(e: KeyboardEvent) {
     return
   }
 
+  // X swaps the selection's fill and stroke colors.
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'x' || e.key === 'X')) {
+    const ids = store.selectedObjects.filter((o) => o.type === 'path').map((o) => o.id)
+    if (ids.length) {
+      e.preventDefault()
+      store.snapshot('Swap fill and stroke')
+      store.swapFillStroke(ids)
+    }
+    return
+  }
+
   // Single-key tool hotkeys (ignore when a modifier is held, e.g. Cmd+T).
   if (!e.metaKey && !e.ctrlKey && !e.altKey) {
     // Illustrator's single-key tool shortcuts.
@@ -1671,6 +1774,7 @@ onMounted(() => {
   renderer.onObjectDragEnd = onObjectDragEnd
   renderer.onObjectResized = onObjectResized
   renderer.onObjectRotated = onObjectRotated
+  renderer.onObjectsTransformed = onObjectsTransformed
   renderer.onArtboardMounted = wireArtboard
   renderer.onArtboardResized = onArtboardResized
   renderer.onPathNodesChanged = onPathNodesChanged
@@ -1680,6 +1784,9 @@ onMounted(() => {
   // Shapes and imported paths without a node model get derived anchors, so
   // Direct Selection works on every path.
   renderer.resolveNodes = (obj) => (obj.type === 'path' ? localAnchors(obj) : null)
+  renderer.resolveCorners = (obj) => liveCorners(obj as any)
+  renderer.onCornerRadiusDrag = onCornerRadiusDrag
+  renderer.setSelectionChromeHidden(store.activeTool === 'pen')
   // Let the store measure true rendered geometry (e.g. for fit-to-artwork).
   setObjectBoxMeasurer((obj) => (renderer ? renderer.measureObjectBox(obj as any) : null))
   // Let WebMCP tools (which only have the store) drive the viewport.
@@ -1770,6 +1877,8 @@ watch(
 
 // Clean up transient tool state whenever the active tool changes.
 watch(activeTool, () => {
+  // The Pen works over the artwork: no transform box or handles in the way.
+  renderer?.setSelectionChromeHidden(store.activeTool === 'pen')
   if (inlineEdit.value) commitInlineEdit()
   // Switching away mid-path keeps what was drawn (finishPen ignores < 2 anchors).
   if (penNodes) finishPen(false)

@@ -2,9 +2,10 @@
 // SVG.js renders/syncs from this; both human interactions and WebMCP tools
 // mutate this state.
 import { defineStore } from 'pinia'
-import { rectPathData, rotatePoint, nodesToPathData, nodesBounds } from '@/services/canvas/svgEngine'
+import { rectPathData, rotatePoint, nodesToPathData, nodesBounds, roundedPathData } from '@/services/canvas/svgEngine'
 import type { Box, PathNode } from '@/services/canvas/svgEngine'
 import type { GradientFill } from '@/services/canvas/gradient'
+import { isNonePaint } from '@/services/canvas/color'
 import { flattenSubpaths, parsePathData } from '@/services/canvas/svgToPaths'
 
 // ---------------------------------------------------------------------------
@@ -140,8 +141,9 @@ export interface PathObject extends BaseObject {
   // Optional primitive discriminator for shapes drawn by the shape tool. Lets
   // the UI offer shape-specific controls (e.g. rectangle corner radius).
   shape?: 'rect' | 'ellipse' | 'line'
-  // Rectangle corner radius, in the object's base coordinate space (scales with
-  // the object). Only meaningful when shape === 'rect'.
+  // Live corner radius, in the object's base coordinate space (scales with the
+  // object). A rectangle regenerates its rounded outline from it; a node path
+  // rounds every sharp corner of `nodes` into `d` (the nodes stay sharp).
   // ponytail: corners scale with the object's transform, so non-uniform resize
   // (width≠height ratio vs base) skews round corners into elliptical ones, same
   // as scaling a rounded rect in most vector tools. Upgrade path: regenerate d
@@ -903,7 +905,7 @@ export const useCanvasStore = defineStore('canvas', {
       // A node-edit drag moves anchors but not the subpath structure, so keep
       // the object's existing subpaths unless the caller passes a new layout.
       if (subpaths !== undefined) obj.subpaths = subpaths
-      obj.d = nodesToPathData(nodes, !!obj.closed, obj.subpaths)
+      obj.d = roundedPathData(nodes, !!obj.closed, obj.subpaths, obj.cornerRadius)
       // Bounds drive the selection box + resize scale; the node coords are kept
       // in the existing frame (may extend past the origin), so d stays aligned.
       obj.width = b.width * sx
@@ -959,16 +961,41 @@ export const useCanvasStore = defineStore('canvas', {
       return this.updatePathNodes(id, nodes)
     },
 
-    // Set a rectangle's corner radius and regenerate its path data. Radius is in
-    // the object's base coordinate space so it scales with the shape (matching
-    // how the renderer scales all path geometry). No-op for non-rect paths.
+    // Set a path's live corner radius and regenerate its path data. Radius is
+    // in the object's base coordinate space so it scales with the shape
+    // (matching how the renderer scales all path geometry). A rectangle stays a
+    // live rectangle; any other path gets a node model whose sharp corners are
+    // rounded (smooth anchors are left as they are).
     setCornerRadius(id: string, radius: number): CanvasObject | null {
-      const obj = this.objects[id]
-      if (!obj || obj.type !== 'path' || obj.shape !== 'rect') return null
       const r = Math.max(0, radius)
-      obj.cornerRadius = r
-      obj.d = rectPathData(obj.baseWidth, obj.baseHeight, r)
+      const cur = this.objects[id]
+      if (!cur || cur.type !== 'path') return null
+      if (cur.shape === 'rect') {
+        cur.cornerRadius = r
+        cur.d = rectPathData(cur.baseWidth, cur.baseHeight, r)
+        return cur
+      }
+      const obj = this.ensurePathNodes(id)
+      if (!obj || obj.type !== 'path' || !obj.nodes) return null
+      obj.cornerRadius = r || undefined
+      obj.d = roundedPathData(obj.nodes, !!obj.closed, obj.subpaths, r)
       return obj
+    },
+
+    // Swap fill and stroke colors (Illustrator's Shift+X; X here). A gradient
+    // fill hands its first stop to the stroke. A stroke that becomes visible
+    // gets a 1pt width if it had none. Text and images have no stroke.
+    swapFillStroke(ids: string[]): void {
+      for (const id of ids) {
+        const obj = this.objects[id]
+        if (!obj || obj.type !== 'path') continue
+        const fill = obj.fillGradient ? obj.fillGradient.stops[0]?.color ?? 'none' : obj.fill
+        const stroke = obj.stroke || 'none'
+        obj.fill = stroke
+        obj.fillGradient = undefined
+        obj.stroke = fill || 'none'
+        if (!isNonePaint(obj.stroke) && !(obj.strokeWidth > 0)) obj.strokeWidth = 1
+      }
     },
 
     // Center an object within its artboard.

@@ -252,15 +252,40 @@ describe('canvas store — resize + rotate', () => {
     expect(after.baseHeight).toBe(100)
   })
 
-  it('setCornerRadius regenerates rounded-rect d from base dims, non-rects ignored', () => {
+  it('setCornerRadius regenerates rounded-rect d from base dims', () => {
     const rect = store.addObject({ type: 'path', shape: 'rect', width: 100, height: 60, d: 'M0 0 H100 V60 H0 Z' })
     const out = store.setCornerRadius(rect.id, 12) as any
     expect(out.cornerRadius).toBe(12)
     expect(out.d).toContain('A12 12')
-    // A plain path (no shape) is left untouched.
-    const plain = store.addObject({ type: 'path', d: 'M0 0 L10 10' })
-    expect(store.setCornerRadius(plain.id, 5)).toBeNull()
-    expect((store.getObject(plain.id) as any).d).toBe('M0 0 L10 10')
+    expect(out.shape).toBe('rect')
+  })
+
+  it('setCornerRadius rounds the sharp corners of any path, keeping sharp nodes', () => {
+    const tri = store.addObject({ type: 'path', d: 'M0 0 L100 0 L50 80 Z' })
+    const out = store.setCornerRadius(tri.id, 5) as any
+    expect(out.cornerRadius).toBe(5)
+    expect(out.nodes).toHaveLength(3)
+    // Each corner becomes two anchors joined by a curve.
+    expect((out.d.match(/C/g) || []).length).toBe(3)
+    // Node edits keep the rounding.
+    store.updatePathNodes(tri.id, [{ x: 0, y: 0 }, { x: 120, y: 0 }, { x: 50, y: 80 }])
+    expect((store.getObject(tri.id) as any).d).toContain('C')
+    // Radius 0 is sharp again.
+    expect((store.setCornerRadius(tri.id, 0) as any).d).not.toContain('C')
+    // A straight line has no corners to round.
+    const line = store.addObject({ type: 'path', d: 'M0 0 L10 10' })
+    expect((store.setCornerRadius(line.id, 5) as any).d).toBe('M0 0 L10 10')
+  })
+
+  it('swapFillStroke swaps colors and gives a new stroke a width', () => {
+    const o = store.addObject({ type: 'path', d: 'M0 0 H10 V10 Z', fill: '#ff0000', stroke: 'none', strokeWidth: 0 })
+    store.swapFillStroke([o.id])
+    const out = store.getObject(o.id) as any
+    expect(out.fill).toBe('none')
+    expect(out.stroke).toBe('#ff0000')
+    expect(out.strokeWidth).toBe(1)
+    store.swapFillStroke([o.id])
+    expect((store.getObject(o.id) as any).fill).toBe('#ff0000')
   })
 
   it('rotateObject normalizes the angle into 0..360', () => {

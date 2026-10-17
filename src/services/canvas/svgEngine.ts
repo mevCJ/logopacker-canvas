@@ -324,6 +324,112 @@ function num(n: number): number {
   return Math.round(n * 1000) / 1000
 }
 
+// ---------------------------------------------------------------------------
+// Live corners: a corner is an anchor where two straight segments meet at an
+// angle. Rounding replaces it with a circular arc (one cubic) of radius r,
+// tangent to both edges, while the sharp anchors stay the editable source.
+// ---------------------------------------------------------------------------
+
+export interface PathCorner {
+  index: number // into the flat node list
+  x: number
+  y: number
+  // Unit directions of the incoming and outgoing edges.
+  u1: { x: number; y: number }
+  u2: { x: number; y: number }
+  // Interior angle between the edges, in radians (π = straight).
+  angle: number
+  // Largest radius whose arc fits in half of each adjacent edge.
+  maxRadius: number
+}
+
+// Node runs (start, count) of a flat node list split by `subpaths`.
+function nodeRuns(total: number, subpaths?: number[]): [number, number][] {
+  if (!subpaths || subpaths.length <= 1) return [[0, total]]
+  const runs: [number, number][] = []
+  let start = 0
+  for (const c of subpaths) {
+    if (c > 0) runs.push([start, c])
+    start += c
+  }
+  if (start < total) runs.push([start, total - start])
+  return runs
+}
+
+export function pathCorners(nodes: PathNode[], closed: boolean, subpaths?: number[]): PathCorner[] {
+  const out: PathCorner[] = []
+  for (const [start, count] of nodeRuns(nodes.length, subpaths)) {
+    if (count < 3) continue
+    for (let k = 0; k < count; k++) {
+      if (!closed && (k === 0 || k === count - 1)) continue
+      const n = nodes[start + k]!
+      const prev = nodes[start + ((k - 1 + count) % count)]!
+      const next = nodes[start + ((k + 1) % count)]!
+      if (n.inX !== undefined || n.outX !== undefined || prev.outX !== undefined || next.inX !== undefined) continue
+      const l1 = Math.hypot(n.x - prev.x, n.y - prev.y)
+      const l2 = Math.hypot(next.x - n.x, next.y - n.y)
+      if (l1 < 1e-9 || l2 < 1e-9) continue
+      const u1 = { x: (n.x - prev.x) / l1, y: (n.y - prev.y) / l1 }
+      const u2 = { x: (next.x - n.x) / l2, y: (next.y - n.y) / l2 }
+      const angle = Math.acos(Math.max(-1, Math.min(1, -(u1.x * u2.x + u1.y * u2.y))))
+      if (angle > Math.PI - 0.01 || angle < 0.01) continue
+      out.push({ index: start + k, x: n.x, y: n.y, u1, u2, angle, maxRadius: (Math.min(l1, l2) / 2) * Math.tan(angle / 2) })
+    }
+  }
+  return out
+}
+
+// The nodes with every corner rounded to radius r (clamped per corner).
+export function roundCorners(
+  nodes: PathNode[],
+  closed: boolean,
+  subpaths: number[] | undefined,
+  r: number,
+): { nodes: PathNode[]; subpaths?: number[] } {
+  if (!(r > 0)) return { nodes, subpaths }
+  const corners = new Map(pathCorners(nodes, closed, subpaths).map((c) => [c.index, c]))
+  if (!corners.size) return { nodes, subpaths }
+  const outNodes: PathNode[] = []
+  const counts: number[] = []
+  for (const [start, count] of nodeRuns(nodes.length, subpaths)) {
+    let added = 0
+    for (let k = 0; k < count; k++) {
+      const c = corners.get(start + k)
+      if (!c) {
+        outNodes.push(nodes[start + k]!)
+        added++
+        continue
+      }
+      const rr = Math.min(r, c.maxRadius)
+      const t = rr / Math.tan(c.angle / 2)
+      // A circular arc through a turn of φ = π − angle: handle length
+      // 4/3·tan(φ/4)·r.
+      const h = (4 / 3) * Math.tan((Math.PI - c.angle) / 4) * rr
+      const a = { x: c.x - c.u1.x * t, y: c.y - c.u1.y * t }
+      const b = { x: c.x + c.u2.x * t, y: c.y + c.u2.y * t }
+      outNodes.push({ x: a.x, y: a.y, outX: a.x + c.u1.x * h, outY: a.y + c.u1.y * h })
+      outNodes.push({ x: b.x, y: b.y, inX: b.x - c.u2.x * h, inY: b.y - c.u2.y * h })
+      added += 2
+    }
+    counts.push(added)
+  }
+  return { nodes: outNodes, subpaths: counts.length > 1 ? counts : undefined }
+}
+
+// Path data for a node path with its live corners applied.
+export function roundedPathData(nodes: PathNode[], closed: boolean, subpaths: number[] | undefined, r = 0): string {
+  const out = roundCorners(nodes, closed, subpaths, r)
+  return nodesToPathData(out.nodes, closed, out.subpaths)
+}
+
+// Shift-drag constraint for shapes: a square box from `from` toward `to`.
+export function constrainSquare(from: { x: number; y: number }, to: { x: number; y: number }): { x: number; y: number } {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const side = Math.max(Math.abs(dx), Math.abs(dy))
+  return { x: from.x + (dx < 0 ? -side : side), y: from.y + (dy < 0 ? -side : side) }
+}
+
 // Axis-aligned bounds of a set of anchors, including their tangent handles so
 // the object box encloses the visible curve, not just the anchor points.
 export function nodesBounds(nodes: PathNode[]): Box {
@@ -511,6 +617,15 @@ export function boxCenter(box: Box): { x: number; y: number } {
   return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
 }
 
+// Display/base scale of a path or image (its geometry is authored at base
+// size). An axis with no extent — a straight horizontal or vertical line — has
+// nothing to scale, so it stays 1 instead of collapsing the shape to nothing.
+export function axisScale(display: number | undefined, base: number | undefined): number {
+  const d = display || 0
+  const b = base ?? d
+  return b && d ? d / b : 1
+}
+
 // Build the SVG transform string for an object placed at absolute (absX, absY)
 // with the given scale and rotation. Order (SVG applies right-to-left):
 //   translate → rotate about the pivot → scale about the origin.
@@ -636,10 +751,12 @@ export function resizeBoxFromHandle(
 
   let newW = box.width + (affectsX ? (west ? -localDx : localDx) : 0)
   let newH = box.height + (affectsY ? (north ? -localDy : localDy) : 0)
-  newW = Math.max(min, newW)
-  newH = Math.max(min, newH)
+  // A zero-extent axis (a straight horizontal/vertical line) stays flat: only
+  // its length scales.
+  newW = box.width ? Math.max(min, newW) : 0
+  newH = box.height ? Math.max(min, newH) : 0
 
-  if (keepAspect && handle.length === 2) {
+  if (keepAspect && handle.length === 2 && box.width && box.height) {
     const ratio = box.width / box.height || 1
     // Drive both dims off the larger relative change to feel natural.
     if (newW / box.width > newH / box.height) newH = newW / ratio
@@ -694,6 +811,77 @@ export function rotationFromPointer(
   const angle = radToDeg(Math.atan2(pointer.y - center.y, pointer.x - center.x))
   // atan2 gives 0° at east; the handle rests north, so add 90°.
   return ((angle + 90) % 360 + 360) % 360
+}
+
+// Corners of a box rotated `deg` about its center, clockwise from top-left.
+export function rotatedCorners(box: Box, deg: number): { x: number; y: number }[] {
+  const c = boxCenter(box)
+  return [
+    { x: box.x, y: box.y },
+    { x: box.x + box.width, y: box.y },
+    { x: box.x + box.width, y: box.y + box.height },
+    { x: box.x, y: box.y + box.height },
+  ].map((p) => rotatePoint(c, p, deg))
+}
+
+// Axis-aligned box around a set of points.
+export function boundsOfPoints(pts: { x: number; y: number }[]): Box | null {
+  if (!pts.length) return null
+  const xs = pts.map((p) => p.x)
+  const ys = pts.map((p) => p.y)
+  const x = Math.min(...xs)
+  const y = Math.min(...ys)
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y }
+}
+
+// A transform applied to a whole multi-selection: its bounding box scaled
+// from one box to another, or everything turned `deg` about a center.
+export type GroupOp =
+  | { kind: 'scale'; from: Box; to: Box }
+  | { kind: 'rotate'; center: { x: number; y: number }; deg: number }
+
+export function mapGroupPoint(op: GroupOp, p: { x: number; y: number }): { x: number; y: number } {
+  if (op.kind === 'rotate') return rotatePoint(op.center, p, op.deg)
+  const fx = axisScale(op.to.width, op.from.width)
+  const fy = axisScale(op.to.height, op.from.height)
+  return { x: op.to.x + (p.x - op.from.x) * fx, y: op.to.y + (p.y - op.from.y) * fy }
+}
+
+// The same op as an SVG transform, for previewing it on the live elements.
+export function groupOpTransform(op: GroupOp): string {
+  if (op.kind === 'rotate') return `rotate(${op.deg} ${op.center.x} ${op.center.y})`
+  const fx = axisScale(op.to.width, op.from.width)
+  const fy = axisScale(op.to.height, op.from.height)
+  return `matrix(${fx} 0 0 ${fy} ${op.to.x - op.from.x * fx} ${op.to.y - op.from.y * fy})`
+}
+
+// How one object of a multi-selection changes under a group op. `origin` is
+// the object's canvas-space translate and `center` its rotation pivot. Its
+// center follows the op exactly; a rotate adds to its angle, and a scale
+// stretches it along its own axes by how much the op lengthens each axis
+// (exact for uniform scales and right-angle rotations). `uniform` scales both
+// axes alike, for text whose size is a single font size.
+export function transformInGroup(
+  item: { origin: { x: number; y: number }; center: { x: number; y: number }; rotation: number },
+  op: GroupOp,
+  uniform = false,
+): { origin: { x: number; y: number }; rotation: number; lx: number; ly: number } {
+  const c = mapGroupPoint(op, item.center)
+  const ox = item.center.x - item.origin.x
+  const oy = item.center.y - item.origin.y
+  if (op.kind === 'rotate') {
+    const rotation = (((item.rotation + op.deg) % 360) + 360) % 360
+    return { origin: { x: c.x - ox, y: c.y - oy }, rotation, lx: 1, ly: 1 }
+  }
+  const fx = axisScale(op.to.width, op.from.width)
+  const fy = axisScale(op.to.height, op.from.height)
+  const a = degToRad(item.rotation)
+  let lx = Math.hypot(fx * Math.cos(a), fy * Math.sin(a))
+  let ly = Math.hypot(fx * Math.sin(a), fy * Math.cos(a))
+  if (uniform) lx = ly = Math.sqrt(lx * ly)
+  // The pivot sits at the post-scale geometry center, so its offset from the
+  // origin scales with the object.
+  return { origin: { x: c.x - ox * lx, y: c.y - oy * ly }, rotation: item.rotation, lx, ly }
 }
 
 // Build the store payload for a shape drawn from `start` to `current` (both in
@@ -890,6 +1078,19 @@ export type ResizeHook = (
   box: { x: number; y: number; width: number; height: number },
 ) => void
 export type RotateHook = (id: string, degrees: number) => void
+// One object's new geometry after a multi-selection scale or rotate.
+export interface GroupTransformPatch {
+  id: string
+  // Artboard-local origin and display size, as stored on the object.
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+  // Uniform factor for sizes the transform doesn't carry (font size).
+  scale: number
+}
+export type GroupTransformHook = (patches: GroupTransformPatch[], kind: GroupOp['kind']) => void
 export type ArtboardMountedHook = (artboard: RenderArtboard, els: { group: SvgEl; label: SvgEl }) => void
 export type ArtboardResizeHook = (
   id: string,
@@ -957,6 +1158,7 @@ export class CanvasRenderer {
   onObjectDragEnd: DragEndHook | null = null
   onObjectResized: ResizeHook | null = null
   onObjectRotated: RotateHook | null = null
+  onObjectsTransformed: GroupTransformHook | null = null
   onArtboardMounted: ArtboardMountedHook | null = null
   onArtboardResized: ArtboardResizeHook | null = null
   // Fired when the node-edit tool commits a reshape (drag of an anchor/handle).
@@ -1141,8 +1343,8 @@ export class CanvasRenderer {
           }
           const dispW = obj.width || 0
           const dispH = obj.height || 0
-          const sx = obj.type === 'text' ? 1 : obj.baseWidth ? dispW / obj.baseWidth : 1
-          const sy = obj.type === 'text' ? 1 : obj.baseHeight ? dispH / obj.baseHeight : 1
+          const sx = obj.type === 'text' ? 1 : axisScale(dispW, obj.baseWidth)
+          const sy = obj.type === 'text' ? 1 : axisScale(dispH, obj.baseHeight)
           return {
             x: originX + b.x * sx,
             y: originY + b.y * sy,
@@ -1166,26 +1368,37 @@ export class CanvasRenderer {
     return this._objectBox(obj)
   }
 
+  // Hide the selection's transform box and handles (e.g. while the Pen tool
+  // is active, as in Illustrator); the selection itself is unchanged.
+  private _chromeHidden = false
+  setSelectionChromeHidden(on: boolean): void {
+    if (this._chromeHidden === on) return
+    this._chromeHidden = on
+    this._redrawSelection()
+  }
+
   private _redrawSelection(): void {
     this.overlayLayer.clear()
     this.handleLayer.clear()
-    if (this._selectedObjects.length === 0) return
+    if (this._selectedObjects.length === 0 || this._chromeHidden) return
 
     const vb = this.getViewBox()
     const strokeW = Math.max(1, vb.width / 600)
 
     if (this._selectedObjects.length > 1) {
-      // Multi-selection: plain axis-aligned outline per object, no handles.
+      // Multi-selection: each object's own outline, plus one bounding box
+      // around them all whose handles scale and rotate the whole selection.
       for (const obj of this._selectedObjects) {
         const box = this._objectBox(obj)
         if (!box) continue
-        const pad = strokeW * 3
-        this.overlayLayer
-          .rect(box.width + pad * 2, box.height + pad * 2)
-          .move(box.x - pad, box.y - pad)
-          .fill('none')
-          .stroke({ color: '#2563eb', width: strokeW })
-          .attr({ 'pointer-events': 'none' })
+        this._framePolygon(box, obj.rotation || 0, strokeW * 0.6)
+      }
+      const group = this._groupBox()
+      if (group) {
+        this._drawTransformFrame(group, 0, strokeW, {
+          resize: (h) => this._wireGroupResize(h),
+          rotate: () => this._wireGroupRotate(),
+        })
       }
       return
     }
@@ -1195,11 +1408,79 @@ export class CanvasRenderer {
     // transform box. Falls through to normal handles for other objects.
     if (this._nodeEditMode && obj.type === 'path' && this._editNodes(obj).length) {
       this._drawNodeEditor(obj, strokeW)
+      this._drawCornerWidgets(obj)
       return
     }
     const box = this._liveBox || this._objectBox(obj)
     if (!box) return
     this._drawSingleSelection(obj, box, strokeW)
+    if (!this._liveBox) this._drawCornerWidgets(obj)
+  }
+
+  // ---- Live corners --------------------------------------------------------
+
+  // A path's corners (local frame) and its current corner radius, supplied by
+  // the host. Null/empty for paths with no sharp corners.
+  resolveCorners: ((obj: RenderObject) => { corners: PathCorner[]; radius: number } | null) | null = null
+  // Fired while a corner widget is dragged, with the new radius in the
+  // object's base frame.
+  onCornerRadiusDrag: ((id: string, radius: number, phase: 'start' | 'move' | 'end') => void) | null = null
+
+  // Illustrator's corner widgets: a small double circle inside each sharp
+  // corner, on the corner's bisector. Dragging one inward rounds every corner.
+  private _drawCornerWidgets(obj: RenderObject): void {
+    if (obj.type !== 'path' || obj.locked) return
+    const info = this.resolveCorners?.(obj)
+    if (!info?.corners.length) return
+    const px = this.canvasUnitsPerPixel()
+    const box = this._objectBox(obj)
+    const minOff = 14 * px
+    // Too small on screen to hold widgets without crowding the handles.
+    if (!box || Math.min(box.width, box.height) < minOff * 4) return
+    const t = this._objectTransformParams(obj)
+    const s = Math.sqrt(Math.abs(t.scaleX * t.scaleY)) || 1
+    for (const c of info.corners) {
+      const p = nodePointToCanvas(c, t)
+      const bx0 = c.u2.x - c.u1.x
+      const by0 = c.u2.y - c.u1.y
+      const bl0 = Math.hypot(bx0, by0)
+      if (bl0 < 1e-9) continue
+      const q = nodePointToCanvas({ x: c.x + bx0 / bl0, y: c.y + by0 / bl0 }, t)
+      const bl = Math.hypot(q.x - p.x, q.y - p.y)
+      if (bl < 1e-9) continue
+      const b = { x: (q.x - p.x) / bl, y: (q.y - p.y) / bl }
+      const sinH = Math.sin(c.angle / 2)
+      const r0 = Math.min(info.radius, c.maxRadius) * s
+      // The widget sits at the arc's center once that is clear of the corner.
+      const dist = Math.max(minOff, r0 / sinH)
+      const w = { x: p.x + b.x * dist, y: p.y + b.y * dist }
+      const g = this.handleLayer.group().attr({ 'data-corner': c.index }).css('cursor', 'pointer')
+      g.circle(9 * px).center(w.x, w.y).fill('#ffffff').stroke({ color: '#2563eb', width: px })
+      g.circle(3.5 * px).center(w.x, w.y).fill('#2563eb')
+      // Generous invisible hit area.
+      g.circle(16 * px).center(w.x, w.y).fill('transparent')
+      ;(g.node as SVGElement).addEventListener('mousedown', (e: MouseEvent) => {
+        e.stopPropagation()
+        e.preventDefault()
+        const start = this.screenToCanvas(e.clientX, e.clientY)
+        const radius0 = Math.min(info.radius, c.maxRadius)
+        this.onCornerRadiusDrag?.(obj.id, radius0, 'start')
+        const onMove = (ev: MouseEvent) => {
+          const cur = this.screenToCanvas(ev.clientX, ev.clientY)
+          // Movement along the bisector, inward positive.
+          const along = (cur.x - start.x) * b.x + (cur.y - start.y) * b.y
+          const r = Math.max(0, (r0 + along * sinH) / s)
+          this.onCornerRadiusDrag?.(obj.id, r, 'move')
+        }
+        const onUp = () => {
+          window.removeEventListener('mousemove', onMove)
+          window.removeEventListener('mouseup', onUp)
+          this.onCornerRadiusDrag?.(obj.id, NaN, 'end')
+        }
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+      })
+    }
   }
 
   // Recreate the exact transform the renderer applied to this path (see
@@ -1343,10 +1624,8 @@ export class CanvasRenderer {
     const absY = (ab ? ab.y : 0) + (obj.y || 0)
     const dispW = obj.width || 0
     const dispH = obj.height || 0
-    const baseW = obj.baseWidth || dispW || 1
-    const baseH = obj.baseHeight || dispH || 1
-    const scaleX = baseW ? dispW / baseW : 1
-    const scaleY = baseH ? dispH / baseH : 1
+    const scaleX = axisScale(dispW, obj.baseWidth)
+    const scaleY = axisScale(dispH, obj.baseHeight)
     const el = this._objectEls.get(obj.id)
     const c = el
       ? this._geometryCenter(el, dispW, dispH, scaleX, scaleY)
@@ -1583,36 +1862,50 @@ export class CanvasRenderer {
 
   private _drawSingleSelection(obj: RenderObject, box: Box, strokeW: number): void {
     const rot = obj.rotation || 0
-    const center = boxCenter(box)
-    const rp = (p: { x: number; y: number }) => rotatePoint(center, p, rot)
-
-    // Rotated outline (a polygon through the four rotated corners).
-    const pts = [
-      rp({ x: box.x, y: box.y }),
-      rp({ x: box.x + box.width, y: box.y }),
-      rp({ x: box.x + box.width, y: box.y + box.height }),
-      rp({ x: box.x, y: box.y + box.height }),
-    ]
-    this.overlayLayer
-      .polygon(pts.map((p) => `${p.x},${p.y}`).join(' '))
-      .fill('none')
-      .stroke({ color: '#2563eb', width: strokeW })
-      .attr({ 'pointer-events': 'none' })
-
-    const vb = this.getViewBox()
-    const hs = Math.max(6, vb.width / 90) // handle square size in canvas units
-    const rotOffset = hs * 2.2
-    const local = handlePositions(box, rotOffset)
-
     // Overflowing area type: Illustrator's red "+" in the bottom-right port.
     if (obj.type === 'text' && obj.area && this._objectEls.get(obj.id)?.node.getAttribute('data-overflow')) {
+      const center = boxCenter(box)
+      const hs = this._handleSize()
       const s = hs * 1.4
       // Just outside the bottom-right corner, clear of the text and handles.
-      const p = rp({ x: box.x + box.width - s * 1.6, y: box.y + box.height + s * 1.3 })
+      const p = rotatePoint(center, { x: box.x + box.width - s * 1.6, y: box.y + box.height + s * 1.3 }, rot)
       const g = this.overlayLayer.group().attr({ 'pointer-events': 'none' })
       g.rect(s, s).center(p.x, p.y).fill('#ffffff').stroke({ color: '#dc2626', width: strokeW * 1.5 })
       g.path(`M${p.x - s * 0.3} ${p.y}H${p.x + s * 0.3}M${p.x} ${p.y - s * 0.3}V${p.y + s * 0.3}`).stroke({ color: '#dc2626', width: strokeW * 1.5 })
     }
+    this._drawTransformFrame(box, rot, strokeW, {
+      resize: (h) => this._wireResizeHandle(obj.id, h),
+      rotate: () => this._wireRotateHandle(obj.id),
+    })
+  }
+
+  private _handleSize(): number {
+    return Math.max(6, this.getViewBox().width / 90) // handle square size in canvas units
+  }
+
+  // A box outline turned `rot` degrees about its center.
+  private _framePolygon(box: Box, rot: number, strokeW: number): void {
+    this.overlayLayer
+      .polygon(rotatedCorners(box, rot).map((p) => `${p.x},${p.y}`).join(' '))
+      .fill('none')
+      .stroke({ color: '#2563eb', width: strokeW })
+      .attr({ 'pointer-events': 'none' })
+  }
+
+  // The transform box: rotated outline, eight resize handles and the rotate
+  // handle above the top edge, each wired by `wire`.
+  private _drawTransformFrame(
+    box: Box,
+    rot: number,
+    strokeW: number,
+    wire: { resize: (h: ResizeHandle) => (el: SvgEl) => void; rotate: () => (el: SvgEl) => void },
+  ): void {
+    const center = boxCenter(box)
+    const rp = (p: { x: number; y: number }) => rotatePoint(center, p, rot)
+    this._framePolygon(box, rot, strokeW)
+
+    const hs = this._handleSize()
+    const local = handlePositions(box, hs * 2.2)
 
     // Line from top-middle to the rotation handle.
     const topMid = rp(local.n)
@@ -1636,7 +1929,7 @@ export class CanvasRenderer {
         .stroke({ color: '#2563eb', width: strokeW })
         .attr({ 'data-handle': h })
         .css('cursor', cursorFor[h])
-      this._wireResizeHandle(obj.id, h)(sq)
+      wire.resize(h)(sq)
     }
 
     // Rotation handle (a circle).
@@ -1647,7 +1940,136 @@ export class CanvasRenderer {
       .stroke({ color: '#2563eb', width: strokeW })
       .attr({ 'data-handle': 'rotate' })
       .css('cursor', 'grab')
-    this._wireRotateHandle(obj.id)(rc)
+    wire.rotate()(rc)
+  }
+
+  // ---- Multi-selection transform ------------------------------------------
+
+  // Canvas-space box around every selected object (rotated ones included).
+  private _groupBox(): Box | null {
+    const pts: { x: number; y: number }[] = []
+    for (const obj of this._selectedObjects) {
+      const box = this._objectBox(obj)
+      if (box) pts.push(...rotatedCorners(box, obj.rotation || 0))
+    }
+    return boundsOfPoints(pts)
+  }
+
+  // Elements' own transforms at the start of a group drag, restored after.
+  private _groupStart: Map<string, string | null> | null = null
+
+  // Show a group op live: prefix it onto each selected element's transform
+  // and draw the frame where it is going.
+  private _previewGroup(op: GroupOp, frame: Box, frameRot: number): void {
+    if (!this._groupStart) {
+      this._groupStart = new Map()
+      for (const obj of this._selectedObjects) {
+        const el = this._objectEls.get(obj.id)
+        if (el) this._groupStart.set(obj.id, el.node.getAttribute('transform'))
+      }
+    }
+    const t = groupOpTransform(op)
+    for (const [id, own] of this._groupStart) {
+      this._objectEls.get(id)?.attr('transform', own ? `${t} ${own}` : t)
+    }
+    this.overlayLayer.clear()
+    this.handleLayer.clear()
+    this._framePolygon(frame, frameRot, Math.max(1, this.getViewBox().width / 600))
+  }
+
+  private _endGroupPreview(): void {
+    for (const [id, own] of this._groupStart ?? []) this._objectEls.get(id)?.attr('transform', own)
+    this._groupStart = null
+  }
+
+  // Track a group drag on the window; `step` returns the op for a pointer
+  // event, which is committed through onObjectsTransformed on release.
+  private _trackGroupDrag(step: (ev: MouseEvent) => GroupOp | null): void {
+    let op: GroupOp | null = null
+    const onMove = (ev: MouseEvent) => {
+      op = step(ev)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      this._endGroupPreview()
+      if (!op || !this.onObjectsTransformed) {
+        this._redrawSelection()
+        return
+      }
+      const patches = this._selectedObjects
+        .map((obj) => this._groupPatch(obj, op!))
+        .filter((p): p is GroupTransformPatch => !!p)
+      this.onObjectsTransformed(patches, op.kind)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
+  private _groupPatch(obj: RenderObject, op: GroupOp): GroupTransformPatch | null {
+    const box = this._objectBox(obj)
+    if (!box) return null
+    const ab = obj.artboardId ? this._artboardBoxes.get(obj.artboardId) : null
+    const ax = ab ? ab.x : 0
+    const ay = ab ? ab.y : 0
+    // Point type has one size (its font size), so it scales uniformly.
+    const uniform = obj.type === 'text' && !obj.area
+    const r = transformInGroup(
+      { origin: { x: ax + (obj.x || 0), y: ay + (obj.y || 0) }, center: boxCenter(box), rotation: obj.rotation || 0 },
+      op,
+      uniform,
+    )
+    return {
+      id: obj.id,
+      x: r.origin.x - ax,
+      y: r.origin.y - ay,
+      width: (obj.width || 0) * r.lx,
+      height: (obj.height || 0) * r.ly,
+      rotation: r.rotation,
+      scale: Math.sqrt(r.lx * r.ly),
+    }
+  }
+
+  private _wireGroupResize(handle: ResizeHandle) {
+    return (el: SvgEl) => {
+      el.node.addEventListener('mousedown', (e: MouseEvent) => {
+        e.stopPropagation()
+        e.preventDefault()
+        const from = this._groupBox()
+        if (!from || (from.width < 1 && from.height < 1)) return
+        const origin = { x: e.clientX, y: e.clientY }
+        this._trackGroupDrag((ev) => {
+          const { sx, sy } = this._canvasScale()
+          const dx = (ev.clientX - origin.x) * sx
+          const dy = (ev.clientY - origin.y) * sy
+          const to = resizeBoxFromHandle(from, handle, dx, dy, 0, ev.shiftKey)
+          const op: GroupOp = { kind: 'scale', from, to }
+          this._previewGroup(op, to, 0)
+          return op
+        })
+      })
+    }
+  }
+
+  private _wireGroupRotate() {
+    return (el: SvgEl) => {
+      el.node.addEventListener('mousedown', (e: MouseEvent) => {
+        e.stopPropagation()
+        e.preventDefault()
+        const frame = this._groupBox()
+        if (!frame) return
+        const center = boxCenter(frame)
+        const start = rotationFromPointer(center, this.screenToCanvas(e.clientX, e.clientY))
+        this._trackGroupDrag((ev) => {
+          let deg = rotationFromPointer(center, this.screenToCanvas(ev.clientX, ev.clientY)) - start
+          // Snap to 15° increments while Shift is held.
+          if (ev.shiftKey) deg = Math.round(deg / 15) * 15
+          const op: GroupOp = { kind: 'rotate', center, deg }
+          this._previewGroup(op, frame, deg)
+          return op
+        })
+      })
+    }
   }
 
   private _canvasScale(): { sx: number; sy: number } {
@@ -1686,7 +2108,8 @@ export class CanvasRenderer {
         const obj = this._selectedObjects.find((o) => o.id === id)
         if (!obj) return
         const startBox = this._objectBox(obj)
-        if (!startBox || startBox.width < 1 || startBox.height < 1) return
+        // A straight line is flat on one axis; it still resizes along the other.
+        if (!startBox || (startBox.width < 1 && startBox.height < 1)) return
         const rot = obj.rotation || 0
         const origin = { x: e.clientX, y: e.clientY }
         const onMove = (ev: MouseEvent) => {
@@ -1741,10 +2164,8 @@ export class CanvasRenderer {
           if (objEl) {
             const dispW = obj.width || 0
             const dispH = obj.height || 0
-            const baseW = obj.baseWidth || dispW || 1
-            const baseH = obj.baseHeight || dispH || 1
-            const sx = obj.type === 'text' ? 1 : baseW ? dispW / baseW : 1
-            const sy = obj.type === 'text' ? 1 : baseH ? dispH / baseH : 1
+            const sx = obj.type === 'text' ? 1 : axisScale(dispW, obj.baseWidth)
+            const sy = obj.type === 'text' ? 1 : axisScale(dispH, obj.baseHeight)
             const ab = obj.artboardId ? this._artboardBoxes.get(obj.artboardId) : null
             const ax = ab ? ab.x : 0
             const ay = ab ? ab.y : 0
@@ -2073,14 +2494,12 @@ export class CanvasRenderer {
     const rot = obj.rotation || 0
     const dispW = obj.width || 0
     const dispH = obj.height || 0
-    const baseW = obj.baseWidth || dispW || 1
-    const baseH = obj.baseHeight || dispH || 1
 
     if (obj.type === 'path') {
       el.attr(pathAttrs(obj))
       // Path geometry (d) is authored at base size; scale to the display size.
-      const sx = baseW ? dispW / baseW : 1
-      const sy = baseH ? dispH / baseH : 1
+      const sx = axisScale(dispW, obj.baseWidth)
+      const sy = axisScale(dispH, obj.baseHeight)
       const c = this._geometryCenter(el, dispW, dispH, sx, sy)
       el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy, c.cx, c.cy))
     } else if (obj.type === 'text') {
@@ -2113,8 +2532,8 @@ export class CanvasRenderer {
     } else if (obj.type === 'image') {
       el.attr(imageAttrs(obj))
       el.attr({ x: 0, y: 0 })
-      const sx = baseW ? dispW / baseW : 1
-      const sy = baseH ? dispH / baseH : 1
+      const sx = axisScale(dispW, obj.baseWidth)
+      const sy = axisScale(dispH, obj.baseHeight)
       el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy))
     }
 
@@ -2128,7 +2547,17 @@ export class CanvasRenderer {
   }
 
   private _wireDrag(obj: RenderObject, el: SvgEl): void {
-    let startBox: { x: number; y: number } | null = null
+    // Pointer position at drag start, in canvas space. svg.draggable reports
+    // its box/deltas in the element's own coordinate frame, which a rotated or
+    // scaled object turns and stretches, so the delta is measured here instead.
+    let startPt: { x: number; y: number } | null = null
+    const pointerDelta = (ev: MouseEvent | TouchEvent | undefined) => {
+      if (!startPt || !ev) return null
+      const p = 'changedTouches' in ev ? ev.changedTouches[0] : ev
+      if (!p) return null
+      const c = this.screenToCanvas(p.clientX, p.clientY)
+      return { dx: c.x - startPt.x, dy: c.y - startPt.y }
+    }
     // Ghost: a translucent clone that follows the cursor during the drag. The
     // real element stays put until the user drops, at which point we commit the
     // final delta to the store.
@@ -2158,7 +2587,9 @@ export class CanvasRenderer {
     let dragIds: string[] = []
     let lastDelta: { dx: number; dy: number } | null = null
     el.on('dragstart', (e: CustomEvent) => {
-      startBox = (e.detail as { box: { x: number; y: number } }).box
+      const startEv = (e.detail as { event?: MouseEvent | TouchEvent }).event
+      const sp = startEv && ('changedTouches' in startEv ? startEv.changedTouches[0] : startEv)
+      startPt = sp ? this.screenToCanvas(sp.clientX, sp.clientY) : null
       clearGhost()
       lastDelta = null
       const selectedIds0 = this._selectedObjects.map((o) => o.id)
@@ -2185,11 +2616,10 @@ export class CanvasRenderer {
       // Stop the plugin from moving the real element; move the ghost instead so
       // the original stays fixed while the preview tracks the cursor.
       e.preventDefault()
-      const detail = e.detail as { box: { x: number; y: number }; event?: MouseEvent }
-      const box = detail.box
-      if (ghost && startBox) {
-        let dx = box.x - startBox.x
-        let dy = box.y - startBox.y
+      const detail = e.detail as { event?: MouseEvent }
+      const raw = pointerDelta(detail.event)
+      if (ghost && raw) {
+        let { dx, dy } = raw
         if (this.snapMove) ({ dx, dy } = this.snapMove(dragIds, dx, dy, detail.event))
         lastDelta = { dx, dy }
         try {
@@ -2201,14 +2631,14 @@ export class CanvasRenderer {
     })
     el.on('dragend', (e: CustomEvent) => {
       clearGhost()
-      const detail = e.detail as { box: { x: number; y: number }; event?: MouseEvent }
-      const endBox = detail.box
+      const detail = e.detail as { event?: MouseEvent }
       this.onSnapEnd?.()
-      if (!startBox) return
+      const raw = pointerDelta(detail.event)
+      if (!raw) return
       // Commit what the ghost showed (the snapped delta), not the raw pointer.
-      const dx = lastDelta ? lastDelta.dx : endBox.x - startBox.x
-      const dy = lastDelta ? lastDelta.dy : endBox.y - startBox.y
-      startBox = null
+      const dx = lastDelta ? lastDelta.dx : raw.dx
+      const dy = lastDelta ? lastDelta.dy : raw.dy
+      startPt = null
       lastDelta = null
       if ((dx === 0 && dy === 0) || typeof this.onObjectDragEnd !== 'function') {
         return

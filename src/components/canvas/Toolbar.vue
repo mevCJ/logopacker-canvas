@@ -67,6 +67,7 @@ import ControlBar from './ControlBar.vue'
 import { openSketchDialog } from '@/services/capture/captureState'
 import { addFontFiles, fontLibrary, loadLocalFonts } from '@/services/canvas/fontLibrary'
 import { createOutlines } from '@/services/canvas/textOutlines'
+import { expandAppearance, hasVisibleStroke } from '@/services/canvas/expandAppearance'
 import { snapSettings } from '@/services/canvas/snapSettings'
 
 const emit = defineEmits<{
@@ -178,6 +179,20 @@ async function outlines() {
   }
 }
 
+// Object ▸ Expand Appearance: strokes become filled outlines.
+async function expand() {
+  const ids = store.selectedObjects.filter(hasVisibleStroke).map((o) => o.id)
+  if (!ids.length) return
+  store.snapshot('Expand Appearance')
+  try {
+    const out = await expandAppearance(store, [...store.selectedIds])
+    store.selectObjects(out)
+  } catch (err) {
+    store.undo()
+    window.alert((err as Error).message)
+  }
+}
+
 async function useInstalledFonts() {
   try {
     const n = await loadLocalFonts()
@@ -275,6 +290,8 @@ const menus = computed<Menu[]>(() => [
         },
         disabled: () => !store.orderedObjects.some((o) => o.hidden),
       },
+      SEP,
+      { label: 'Expand Appearance', action: expand, disabled: () => !store.selectedObjects.some(hasVisibleStroke) },
       SEP,
       { header: 'Pathfinder' },
       { label: 'Unite', action: () => pathfinder('unite'), disabled: () => selPaths().length < 2 },

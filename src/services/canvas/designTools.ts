@@ -20,6 +20,7 @@ import { CLEANUP_DEFAULTS, type ColorFilter } from '@/services/capture/sketchCle
 import { placeSketch } from '@/services/capture/placeSketch'
 import { openSketchDialog } from '@/services/capture/captureState'
 import { createOutlines } from './textOutlines'
+import { expandAppearance } from './expandAppearance'
 
 export function buildDesignTools(
   store: CanvasStore,
@@ -371,6 +372,28 @@ export function buildDesignTools(
         } catch (err) {
           store.undo()
           return fail('Create outlines', err)
+        }
+      },
+    },
+    {
+      name: 'expand_appearance',
+      description:
+        'Object > Expand Appearance: converts the strokes of path objects into filled outline shapes (miter joins, butt caps, like the rendered stroke). A path with a fill keeps it and gets a separate outline object above it; a stroke-only path is replaced by its outline.',
+      inputSchema: {
+        type: 'object',
+        properties: { ids: { type: 'array', items: { type: 'string' } } },
+        required: ['ids'],
+      },
+      async execute({ ids }: { ids: string[] }) {
+        store.snapshot('Expand Appearance')
+        try {
+          const out = await expandAppearance(store, ids)
+          store.selectObjects(out)
+          log(`Expanded appearance of ${ids.length} object(s)`)
+          return text({ ids: out })
+        } catch (err) {
+          store.undo()
+          return fail('Expand appearance', err)
         }
       },
     },
