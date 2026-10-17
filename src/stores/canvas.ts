@@ -120,6 +120,11 @@ interface BaseObject {
   locked?: boolean
 }
 
+export const STROKE_CAPS = ['butt', 'round', 'square'] as const
+export type StrokeCap = (typeof STROKE_CAPS)[number]
+export const STROKE_JOINS = ['miter', 'round', 'bevel'] as const
+export type StrokeJoin = (typeof STROKE_JOINS)[number]
+
 export interface PathObject extends BaseObject {
   type: 'path'
   d: string
@@ -128,6 +133,10 @@ export interface PathObject extends BaseObject {
   fillGradient?: GradientFill
   stroke: string
   strokeWidth: number
+  // How open ends and corners of the stroke are drawn (Illustrator's Cap and
+  // Corner). Absent means SVG's defaults: butt caps, miter joins.
+  strokeLinecap?: StrokeCap
+  strokeLinejoin?: StrokeJoin
   // Editable Bézier anchors (local/base frame), the source of truth for
   // pen-drawn paths. When present, `d` is derived from these; the node-edit
   // tool reshapes the path by mutating them. Absent for shapes/imported paths.
@@ -852,11 +861,18 @@ export const useCanvasStore = defineStore('canvas', {
     },
     setStroke(
       id: string,
-      { stroke, strokeWidth }: { stroke?: string; strokeWidth?: number } = {},
+      {
+        stroke,
+        strokeWidth,
+        cap,
+        join,
+      }: { stroke?: string; strokeWidth?: number; cap?: StrokeCap; join?: StrokeJoin } = {},
     ): CanvasObject | null {
       const patch: Record<string, unknown> = {}
       if (stroke !== undefined) patch.stroke = stroke
       if (strokeWidth !== undefined) patch.strokeWidth = strokeWidth
+      if (cap !== undefined && STROKE_CAPS.includes(cap)) patch.strokeLinecap = cap
+      if (join !== undefined && STROKE_JOINS.includes(join)) patch.strokeLinejoin = join
       return this.updateObject(id, patch)
     },
     // Step the font size of text objects (Illustrator's ⇧⌘> / ⇧⌘<). Point
@@ -922,6 +938,18 @@ export const useCanvasStore = defineStore('canvas', {
       const obj = this.objects[id]
       if (!obj || obj.type !== 'path') return null
       if (obj.nodes?.length) return obj
+      if (obj.shape === 'rect') {
+        // A rectangle becomes its four sharp corners; its radius carries on as
+        // live corners, so the outline is unchanged.
+        const w = obj.baseWidth
+        const h = obj.baseHeight
+        obj.nodes = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }]
+        obj.subpaths = undefined
+        obj.closed = true
+        obj.d = roundedPathData(obj.nodes, true, undefined, obj.cornerRadius)
+        delete obj.shape
+        return obj
+      }
       const { nodes, subpaths, closed } = flattenSubpaths(parsePathData(obj.d || ''))
       if (nodes.length < 2) return null
       obj.nodes = nodes
@@ -977,8 +1005,24 @@ export const useCanvasStore = defineStore('canvas', {
       }
       const obj = this.ensurePathNodes(id)
       if (!obj || obj.type !== 'path' || !obj.nodes) return null
+      // One radius for every corner: drop per-anchor overrides.
+      if (obj.nodes.some((n) => n.radius !== undefined)) {
+        obj.nodes = obj.nodes.map(({ radius: _r, ...n }) => n)
+      }
       obj.cornerRadius = r || undefined
       obj.d = roundedPathData(obj.nodes, !!obj.closed, obj.subpaths, r)
+      return obj
+    },
+
+    // Round only the given corner anchors (Direct Selection + corner widget).
+    // Works on any path; a rectangle becomes a node path with live corners.
+    setNodeCornerRadius(id: string, indices: number[], radius: number): CanvasObject | null {
+      const obj = this.ensurePathNodes(id)
+      if (!obj || obj.type !== 'path' || !obj.nodes) return null
+      const r = Math.max(0, radius)
+      const pick = new Set(indices)
+      obj.nodes = obj.nodes.map((n, i) => (pick.has(i) ? { ...n, radius: r } : n))
+      obj.d = roundedPathData(obj.nodes, !!obj.closed, obj.subpaths, obj.cornerRadius)
       return obj
     },
 

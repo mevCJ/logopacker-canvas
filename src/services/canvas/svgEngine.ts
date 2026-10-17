@@ -8,6 +8,7 @@
 // methods that aren't in the base type definitions, so plugin-augmented calls
 // use loosely-typed element references.
 import { SVG } from '@svgdotjs/svg.js'
+import svgpath from 'svgpath'
 import '@svgdotjs/svg.draggable.js'
 import { splitPaint } from './color'
 import { gradientId, gradientMarkup, type GradientFill } from './gradient'
@@ -41,6 +42,8 @@ export interface RenderObject {
   fill?: string | null
   stroke?: string | null
   strokeWidth?: number
+  strokeLinecap?: string
+  strokeLinejoin?: string
   nodes?: PathNode[]
   closed?: boolean
   subpaths?: number[]
@@ -130,12 +133,24 @@ function fillAttrs(obj: RenderObject, fallback: string) {
   return paintAttrs('fill', obj.fill, fallback)
 }
 
+// A path's geometry at its display size. Paths are authored at base size and
+// scaled by width/baseWidth; scaling the geometry itself (instead of the
+// element with an SVG scale transform) keeps the stroke its true width — a
+// transform would stretch it with the shape, squishing it on a narrowed one.
+export function displayPathData(d: string, sx: number, sy: number): string {
+  if ((sx === 1 && sy === 1) || !d) return d
+  return svgpath(d).scale(sx, sy).round(3).toString()
+}
+
 export function pathAttrs(obj: RenderObject): Record<string, string | number> {
   return {
     d: obj.d || '',
     ...fillAttrs(obj, 'none'),
     ...paintAttrs('stroke', obj.stroke, 'none'),
     'stroke-width': obj.strokeWidth || 0,
+    // SVG's own defaults; written out so a cleared value resets the element.
+    'stroke-linecap': obj.strokeLinecap || 'butt',
+    'stroke-linejoin': obj.strokeLinejoin || 'miter',
     opacity: obj.opacity == null ? 1 : obj.opacity,
   }
 }
@@ -265,6 +280,9 @@ export interface PathNode {
   inY?: number
   outX?: number
   outY?: number
+  // Live corner radius of this anchor (when it is a corner), overriding the
+  // path's own cornerRadius. Base frame units.
+  radius?: number
 }
 
 // Serialize an ordered list of anchors into SVG path data. A segment uses a
@@ -341,6 +359,10 @@ export interface PathCorner {
   angle: number
   // Largest radius whose arc fits in half of each adjacent edge.
   maxRadius: number
+  // Length of the shorter adjacent edge.
+  edge: number
+  // The anchor's own radius, when set.
+  radius?: number
 }
 
 // Node runs (start, count) of a flat node list split by `subpaths`.
@@ -373,21 +395,36 @@ export function pathCorners(nodes: PathNode[], closed: boolean, subpaths?: numbe
       const u2 = { x: (next.x - n.x) / l2, y: (next.y - n.y) / l2 }
       const angle = Math.acos(Math.max(-1, Math.min(1, -(u1.x * u2.x + u1.y * u2.y))))
       if (angle > Math.PI - 0.01 || angle < 0.01) continue
-      out.push({ index: start + k, x: n.x, y: n.y, u1, u2, angle, maxRadius: (Math.min(l1, l2) / 2) * Math.tan(angle / 2) })
+      out.push({
+        index: start + k,
+        x: n.x,
+        y: n.y,
+        u1,
+        u2,
+        angle,
+        maxRadius: (Math.min(l1, l2) / 2) * Math.tan(angle / 2),
+        edge: Math.min(l1, l2),
+        radius: n.radius,
+      })
     }
   }
   return out
 }
 
-// The nodes with every corner rounded to radius r (clamped per corner).
+// The nodes with every corner rounded — to its own radius, else r — clamped
+// per corner.
 export function roundCorners(
   nodes: PathNode[],
   closed: boolean,
   subpaths: number[] | undefined,
   r: number,
 ): { nodes: PathNode[]; subpaths?: number[] } {
-  if (!(r > 0)) return { nodes, subpaths }
-  const corners = new Map(pathCorners(nodes, closed, subpaths).map((c) => [c.index, c]))
+  if (!(r > 0) && !nodes.some((n) => (n.radius ?? 0) > 0)) return { nodes, subpaths }
+  const corners = new Map(
+    pathCorners(nodes, closed, subpaths)
+      .filter((c) => (c.radius ?? r) > 0)
+      .map((c) => [c.index, c]),
+  )
   if (!corners.size) return { nodes, subpaths }
   const outNodes: PathNode[] = []
   const counts: number[] = []
@@ -400,7 +437,7 @@ export function roundCorners(
         added++
         continue
       }
-      const rr = Math.min(r, c.maxRadius)
+      const rr = Math.min(c.radius ?? r, c.maxRadius)
       const t = rr / Math.tan(c.angle / 2)
       // A circular arc through a turn of φ = π − angle: handle length
       // 4/3·tan(φ/4)·r.
@@ -445,6 +482,7 @@ export function nodesBounds(nodes: PathNode[]): Box {
 // Shift every anchor + handle by (dx, dy). Returns new node objects.
 export function translateNodes(nodes: PathNode[], dx: number, dy: number): PathNode[] {
   return nodes.map((n) => ({
+    ...n,
     x: n.x + dx,
     y: n.y + dy,
     inX: n.inX === undefined ? undefined : n.inX + dx,
@@ -469,6 +507,7 @@ export function applyNodeDrag(
     if (i !== index) return { ...n }
     if (kind === 'anchor') {
       return {
+        ...n,
         x: n.x + dx,
         y: n.y + dy,
         inX: n.inX === undefined ? undefined : n.inX + dx,
@@ -1039,7 +1078,7 @@ export function constrainAngle(
 // Reverse a run of anchors (so its last anchor becomes its first), swapping
 // each anchor's in/out handles so the curve is unchanged.
 export function reverseNodes(nodes: PathNode[]): PathNode[] {
-  return [...nodes].reverse().map((n) => ({ x: n.x, y: n.y, inX: n.outX, inY: n.outY, outX: n.inX, outY: n.inY }))
+  return [...nodes].reverse().map((n) => ({ ...n, inX: n.outX, inY: n.outY, outX: n.inX, outY: n.inY }))
 }
 
 export function documentBounds(artboards: RenderArtboard[] | undefined, padding = 200): Box {
@@ -1343,14 +1382,9 @@ export class CanvasRenderer {
           }
           const dispW = obj.width || 0
           const dispH = obj.height || 0
-          const sx = obj.type === 'text' ? 1 : axisScale(dispW, obj.baseWidth)
-          const sy = obj.type === 'text' ? 1 : axisScale(dispH, obj.baseHeight)
-          return {
-            x: originX + b.x * sx,
-            y: originY + b.y * sy,
-            width: b.width * sx,
-            height: b.height * sy,
-          }
+          // Paths draw at display size (see displayPathData) and text is never
+          // scaled, so the element's bbox is already the display box.
+          return { x: originX + b.x, y: originY + b.y, width: b.width, height: b.height }
         } catch {
           /* fall through to stored dims */
         }
@@ -1424,22 +1458,29 @@ export class CanvasRenderer {
   resolveCorners: ((obj: RenderObject) => { corners: PathCorner[]; radius: number } | null) | null = null
   // Fired while a corner widget is dragged, with the new radius in the
   // object's base frame.
-  onCornerRadiusDrag: ((id: string, radius: number, phase: 'start' | 'move' | 'end') => void) | null = null
+  // `corners` is the anchor indices being rounded, or null for all of them.
+  onCornerRadiusDrag:
+    | ((id: string, radius: number, phase: 'start' | 'move' | 'end', corners: number[] | null) => void)
+    | null = null
 
   // Illustrator's corner widgets: a small double circle inside each sharp
-  // corner, on the corner's bisector. Dragging one inward rounds every corner.
+  // corner, on the corner's bisector. Dragging one inward rounds every corner;
+  // with anchors selected (Direct Selection) only those corners show widgets
+  // and only they change.
   private _drawCornerWidgets(obj: RenderObject): void {
     if (obj.type !== 'path' || obj.locked) return
     const info = this.resolveCorners?.(obj)
     if (!info?.corners.length) return
+    const picked = this._nodeEditMode && this._nodeSelId === obj.id && this._nodeSel.size ? this._nodeSel : null
+    const corners = picked ? info.corners.filter((c) => picked.has(c.index)) : info.corners
+    const scope = picked ? corners.map((c) => c.index) : null
     const px = this.canvasUnitsPerPixel()
-    const box = this._objectBox(obj)
     const minOff = 14 * px
-    // Too small on screen to hold widgets without crowding the handles.
-    if (!box || Math.min(box.width, box.height) < minOff * 4) return
     const t = this._objectTransformParams(obj)
     const s = Math.sqrt(Math.abs(t.scaleX * t.scaleY)) || 1
-    for (const c of info.corners) {
+    for (const c of corners) {
+      // Edges too short on screen to hold a widget clear of the anchors.
+      if (c.edge * s < minOff * 2) continue
       const p = nodePointToCanvas(c, t)
       const bx0 = c.u2.x - c.u1.x
       const by0 = c.u2.y - c.u1.y
@@ -1450,7 +1491,8 @@ export class CanvasRenderer {
       if (bl < 1e-9) continue
       const b = { x: (q.x - p.x) / bl, y: (q.y - p.y) / bl }
       const sinH = Math.sin(c.angle / 2)
-      const r0 = Math.min(info.radius, c.maxRadius) * s
+      const own = c.radius ?? info.radius
+      const r0 = Math.min(own, c.maxRadius) * s
       // The widget sits at the arc's center once that is clear of the corner.
       const dist = Math.max(minOff, r0 / sinH)
       const w = { x: p.x + b.x * dist, y: p.y + b.y * dist }
@@ -1463,19 +1505,18 @@ export class CanvasRenderer {
         e.stopPropagation()
         e.preventDefault()
         const start = this.screenToCanvas(e.clientX, e.clientY)
-        const radius0 = Math.min(info.radius, c.maxRadius)
-        this.onCornerRadiusDrag?.(obj.id, radius0, 'start')
+        this.onCornerRadiusDrag?.(obj.id, Math.min(own, c.maxRadius), 'start', scope)
         const onMove = (ev: MouseEvent) => {
           const cur = this.screenToCanvas(ev.clientX, ev.clientY)
           // Movement along the bisector, inward positive.
           const along = (cur.x - start.x) * b.x + (cur.y - start.y) * b.y
           const r = Math.max(0, (r0 + along * sinH) / s)
-          this.onCornerRadiusDrag?.(obj.id, r, 'move')
+          this.onCornerRadiusDrag?.(obj.id, r, 'move', scope)
         }
         const onUp = () => {
           window.removeEventListener('mousemove', onMove)
           window.removeEventListener('mouseup', onUp)
-          this.onCornerRadiusDrag?.(obj.id, NaN, 'end')
+          this.onCornerRadiusDrag?.(obj.id, NaN, 'end', scope)
         }
         window.addEventListener('mousemove', onMove)
         window.addEventListener('mouseup', onUp)
@@ -1501,8 +1542,9 @@ export class CanvasRenderer {
     }
     if (!b.width || !b.height) return null
     const t = this._objectTransformParams(obj)
-    // Text carries its size in fontSize and is never scaled (see _renderObject).
-    if (obj.type === 'text') {
+    // Text carries its size in fontSize and is never scaled, and a path is
+    // drawn at display size: their element frame is already unscaled.
+    if (obj.type === 'text' || obj.type === 'path') {
       t.scaleX = 1
       t.scaleY = 1
     }
@@ -1627,8 +1669,12 @@ export class CanvasRenderer {
     const scaleX = axisScale(dispW, obj.baseWidth)
     const scaleY = axisScale(dispH, obj.baseHeight)
     const el = this._objectEls.get(obj.id)
+    // A path element is already at display size; an image is scaled by its
+    // transform.
     const c = el
-      ? this._geometryCenter(el, dispW, dispH, scaleX, scaleY)
+      ? obj.type === 'image'
+        ? this._geometryCenter(el, dispW, dispH, scaleX, scaleY)
+        : this._geometryCenter(el, dispW, dispH, 1, 1)
       : { cx: dispW / 2, cy: dispH / 2 }
     return { absX, absY, rotationDeg: obj.rotation || 0, scaleX, scaleY, cx: c.cx, cy: c.cy }
   }
@@ -1668,9 +1714,13 @@ export class CanvasRenderer {
   // A path's anchors with their Bézier handles, in canvas space.
   pathNodesOnCanvas(obj: RenderObject): PathNode[] {
     const t = this._objectTransformParams(obj)
+    const s = Math.sqrt(Math.abs(t.scaleX * t.scaleY)) || 1
+    const r = (obj as { cornerRadius?: number }).cornerRadius
     return this._editNodes(obj).map((n) => {
       const a = nodePointToCanvas(n, t)
       const out: PathNode = { x: a.x, y: a.y }
+      const nr = n.radius ?? r
+      if (nr) out.radius = nr * s
       if (n.inX !== undefined && n.inY !== undefined) {
         const h = nodePointToCanvas({ x: n.inX, y: n.inY }, t)
         out.inX = h.x
@@ -1857,7 +1907,8 @@ export class CanvasRenderer {
   // element's `d` (base frame) without going through the store.
   private _applyLivePath(el: SvgEl, obj: RenderObject): void {
     if (!this._liveNodes) return
-    el.attr('d', nodesToPathData(this._liveNodes, !!obj.closed, obj.subpaths))
+    const d = nodesToPathData(this._liveNodes, !!obj.closed, obj.subpaths)
+    el.attr('d', displayPathData(d, axisScale(obj.width, obj.baseWidth), axisScale(obj.height, obj.baseHeight)))
   }
 
   private _drawSingleSelection(obj: RenderObject, box: Box, strokeW: number): void {
@@ -2164,8 +2215,9 @@ export class CanvasRenderer {
           if (objEl) {
             const dispW = obj.width || 0
             const dispH = obj.height || 0
-            const sx = obj.type === 'text' ? 1 : axisScale(dispW, obj.baseWidth)
-            const sy = obj.type === 'text' ? 1 : axisScale(dispH, obj.baseHeight)
+            // Only images carry their scale in the transform.
+            const sx = obj.type === 'image' ? axisScale(dispW, obj.baseWidth) : 1
+            const sy = obj.type === 'image' ? axisScale(dispH, obj.baseHeight) : 1
             const ab = obj.artboardId ? this._artboardBoxes.get(obj.artboardId) : null
             const ax = ab ? ab.x : 0
             const ay = ab ? ab.y : 0
@@ -2354,6 +2406,7 @@ export class CanvasRenderer {
       if (!seen.has(id)) {
         el.remove()
         this._objectEls.delete(id)
+        this._displayDCache.delete(id)
       }
     }
     for (const [id, def] of this._gradientDefs) {
@@ -2464,6 +2517,17 @@ export class CanvasRenderer {
     return { cx: dispW / 2, cy: dispH / 2 }
   }
 
+  // Scaled path data per object, reused while its d and scale are unchanged.
+  private _displayDCache = new Map<string, { d: string; sx: number; sy: number; out: string }>()
+  private _displayD(obj: RenderObject, sx: number, sy: number): string {
+    const d = obj.d || ''
+    const hit = this._displayDCache.get(obj.id)
+    if (hit && hit.d === d && hit.sx === sx && hit.sy === sy) return hit.out
+    const out = displayPathData(d, sx, sy)
+    this._displayDCache.set(obj.id, { d, sx, sy, out })
+    return out
+  }
+
   private _renderObject(obj: RenderObject, artboard: RenderArtboard | undefined): SvgEl {
     let el = this._objectEls.get(obj.id)
     const pos = absolutePosition(obj, artboard)
@@ -2497,11 +2561,11 @@ export class CanvasRenderer {
 
     if (obj.type === 'path') {
       el.attr(pathAttrs(obj))
-      // Path geometry (d) is authored at base size; scale to the display size.
-      const sx = axisScale(dispW, obj.baseWidth)
-      const sy = axisScale(dispH, obj.baseHeight)
-      const c = this._geometryCenter(el, dispW, dispH, sx, sy)
-      el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy, c.cx, c.cy))
+      // Path geometry (d) is authored at base size; draw it at display size so
+      // the stroke keeps its width (see displayPathData).
+      el.attr('d', this._displayD(obj, axisScale(dispW, obj.baseWidth), axisScale(dispH, obj.baseHeight)))
+      const c = this._geometryCenter(el, dispW, dispH, 1, 1)
+      el.attr('transform', objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, c.cx, c.cy))
     } else if (obj.type === 'text') {
       const onPath = this._applyTextPath(obj, el)
       const isArea = !onPath && !!obj.area

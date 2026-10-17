@@ -8,6 +8,7 @@
 import {
   absolutePosition,
   axisScale,
+  displayPathData,
   pathAttrs,
   textAttrs,
   imageAttrs,
@@ -82,10 +83,11 @@ export function objectSvgMarkup(
   const dispH = obj.height || 0
 
   if (obj.type === 'path') {
-    const sx = axisScale(dispW, obj.baseWidth)
-    const sy = axisScale(dispH, obj.baseHeight)
-    const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot, sx, sy)
-    const attrs = serializeAttrs({ ...pathAttrs(obj), transform })
+    // Geometry at display size, as the canvas draws it, so strokes keep
+    // their width.
+    const d = displayPathData(obj.d || '', axisScale(dispW, obj.baseWidth), axisScale(dispH, obj.baseHeight))
+    const transform = objectTransform(pos.x, pos.y, dispW, dispH, rot)
+    const attrs = serializeAttrs({ ...pathAttrs(obj), d, transform })
     return `<path${attrs} />`
   }
 

@@ -99,6 +99,14 @@ describe('live corners', () => {
     expect(nodes[0]!.outY).toBeCloseTo(2 - 0.5523 * 2, 3)
   })
 
+  it('uses an anchor\'s own radius over the path radius', () => {
+    const nodes = square.map((n, i) => (i === 0 ? { ...n, radius: 3 } : n))
+    const out = roundCorners(nodes, true, undefined, 0)
+    // Only the first corner rounds: 3 sharp corners + 2 arc ends.
+    expect(out.nodes).toHaveLength(5)
+    expect(out.nodes[0]!.y).toBeCloseTo(3)
+  })
+
   it('clamps the radius per corner', () => {
     const { nodes } = roundCorners(square, true, undefined, 50)
     expect(nodes[0]!.y).toBeCloseTo(5)

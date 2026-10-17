@@ -81,8 +81,10 @@ describe('CanvasRenderer — tool overlays', () => {
     })
 
     const path = host.querySelector('path.canvas-object')!
-    // Absolute position = artboard (100,100) + local (10,20); scale = 100/50, 50/50.
-    expect(path.getAttribute('transform')).toBe('translate(110 120) rotate(90 50 25) scale(2 1)')
+    // Absolute position = artboard (100,100) + local (10,20). The 2×1 scale is
+    // baked into the geometry, not the transform, so the stroke isn't stretched.
+    expect(path.getAttribute('transform')).toBe('translate(110 120) rotate(90 50 25)')
+    expect(path.getAttribute('d')).toBe('M0 0H100V50H0Z')
 
     const image = host.querySelector('image.canvas-object')!
     // Image renders at base intrinsic size, scale 1, positioned via transform.

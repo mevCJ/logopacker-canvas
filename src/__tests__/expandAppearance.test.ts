@@ -3,6 +3,7 @@ import { setActivePinia, createPinia } from 'pinia'
 import { useCanvasStore, type PathObject } from '@/stores/canvas'
 import { loadPaper } from '@/services/canvas/pathBoolean'
 import { expandAppearance, strokePieces } from '@/services/canvas/expandAppearance'
+import { pathAttrs } from '@/services/canvas/svgEngine'
 
 beforeAll(async () => {
   const proto = HTMLCanvasElement.prototype as unknown as { getContext: (...a: unknown[]) => unknown }
@@ -58,9 +59,9 @@ describe('expandAppearance', () => {
     expect(store.getObject(sq.id)!.stroke).toBe('none')
     const ring = store.getObject(ids[1]!) as PathObject
     expect(ring.fill).toBe('#0000ff')
-    // Scaled 2×, the 2-unit stroke is 4 canvas units: 20 + 4 across.
-    expect(ring.width).toBeCloseTo(24)
-    expect(ring.x).toBeCloseTo(-2)
+    // Scaled 2×, the stroke keeps its 2 units: 20 + 2 across.
+    expect(ring.width).toBeCloseTo(22)
+    expect(ring.x).toBeCloseTo(-1)
     // A ring: outer contour plus the hole.
     expect(ring.subpaths).toHaveLength(2)
     expect(store.objectOrder.indexOf(ring.id)).toBe(store.objectOrder.indexOf(sq.id) + 1)
@@ -72,5 +73,50 @@ describe('expandAppearance', () => {
     const out = store.getObject(id!) as PathObject
     expect(out.nodes!.length).toBeGreaterThan(10)
     expect(out.width).toBeCloseTo(106, 0)
+  })
+})
+
+describe('caps and joins', () => {
+  let store: ReturnType<typeof useCanvasStore>
+  let ab: string
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useCanvasStore()
+    ab = store.addArtboard({ x: 0, y: 0 }).id
+  })
+
+  const line = (cap?: string) =>
+    store.addObject({ type: 'path', d: 'M0 0 L100 0', x: 0, y: 10, width: 100, height: 0, fill: 'none', stroke: '#000000', strokeWidth: 10, strokeLinecap: cap, artboardId: ab }) as PathObject
+
+  it('round caps extend each end by half the width with a rounded tip', async () => {
+    const [id] = await expandAppearance(store, [line('round').id])
+    const out = store.getObject(id!) as PathObject
+    expect(out.width).toBeCloseTo(110, 1)
+    expect(out.x).toBeCloseTo(-5, 1)
+    expect(out.nodes!.length).toBeGreaterThan(20)
+  })
+
+  it('projecting caps extend each end square', async () => {
+    const [id] = await expandAppearance(store, [line('square').id])
+    const out = store.getObject(id!) as PathObject
+    expect(out.width).toBeCloseTo(110)
+    expect(out.nodes).toHaveLength(4)
+  })
+
+  it('round joins round the outside of a corner', () => {
+    const miter = strokePieces([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], false, 2, 'butt', 'miter')
+    const round = strokePieces([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], false, 2, 'butt', 'round')
+    expect(miter[2]).toHaveLength(4)
+    expect(round[2]!.length).toBeGreaterThan(16)
+  })
+
+  it('setStroke stores cap and join and the renderer attrs follow', () => {
+    const o = line()
+    store.setStroke(o.id, { cap: 'round', join: 'bevel' })
+    const out = store.getObject(o.id) as PathObject
+    expect(out.strokeLinecap).toBe('round')
+    expect(out.strokeLinejoin).toBe('bevel')
+    expect(pathAttrs(out as never)['stroke-linecap']).toBe('round')
+    expect(pathAttrs(out as never)['stroke-linejoin']).toBe('bevel')
   })
 })

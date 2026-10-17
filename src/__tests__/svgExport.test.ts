@@ -90,11 +90,12 @@ describe('svgExport — objectSvgMarkup', () => {
   it('renders a path with base->display scale and absolute position', () => {
     const m = objectSvgMarkup(pathObj, artboard)
     expect(m.startsWith('<path')).toBe(true)
-    expect(m).toContain('d="M0 0 H100 V100 H0 Z"')
+    // Scale 50/100 is baked into the geometry so strokes keep their width.
+    expect(m).toContain('d="M0 0H50V50H0Z"')
     expect(m).toContain('fill="#211A43"')
-    // abs position = artboard(100,50) + obj(10,20) = 110,70; scale = 50/100
+    // abs position = artboard(100,50) + obj(10,20) = 110,70
     expect(m).toContain('translate(110 70)')
-    expect(m).toContain('scale(0.5 0.5)')
+    expect(m).not.toContain('scale(')
   })
 
   it('renders text with escaped content and baseline at fontSize', () => {

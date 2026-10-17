@@ -769,8 +769,15 @@ function snapOptions(ev?: MouseEvent): SnapOptions {
   return { points: snapSettings.snapToPoint && !bypass, guides: snapSettings.smartGuides && !bypass }
 }
 
-function localAnchors(o: { id: string; d?: string; nodes?: PathNode[] }): PathNode[] {
+function localAnchors(o: { id: string; d?: string; nodes?: PathNode[]; shape?: string; baseWidth?: number; baseHeight?: number }): PathNode[] {
   if (o.nodes?.length) return o.nodes
+  // A live rectangle's anchors are its four corners (rounded or not), the
+  // same nodes ensurePathNodes gives it.
+  if (o.shape === 'rect') {
+    const w = o.baseWidth || 0
+    const h = o.baseHeight || 0
+    return [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }]
+  }
   const d = o.d || ''
   const cached = anchorCache.get(o.id)
   if (cached && cached.d === d) return cached.pts
@@ -790,12 +797,7 @@ function localAnchors(o: { id: string; d?: string; nodes?: PathNode[] }): PathNo
 function liveCorners(o: CanvasObject): { corners: PathCorner[]; radius: number } | null {
   if (o.type !== 'path' || o.shape === 'ellipse' || o.shape === 'line') return null
   const radius = o.cornerRadius || 0
-  if (o.shape === 'rect') {
-    const w = o.baseWidth
-    const h = o.baseHeight
-    const box = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }]
-    return { corners: pathCorners(box, true), radius }
-  }
+  if (o.shape === 'rect') return { corners: pathCorners(localAnchors(o), true), radius }
   if (o.nodes?.length) return { corners: pathCorners(o.nodes, !!o.closed, o.subpaths), radius }
   try {
     const f = flattenSubpaths(parsePathData(o.d || ''))
@@ -806,9 +808,10 @@ function liveCorners(o: CanvasObject): { corners: PathCorner[]; radius: number }
 }
 
 // Corner widget drag: one undo step for the whole drag, radius clamped to
-// the roundest any corner can get.
+// the roundest any of the affected corners can get. `only` limits it to the
+// selected corner anchors.
 let cornerDragSnapped = false
-function onCornerRadiusDrag(id: string, radius: number, phase: 'start' | 'move' | 'end') {
+function onCornerRadiusDrag(id: string, radius: number, phase: 'start' | 'move' | 'end', only: number[] | null) {
   if (phase !== 'move') {
     cornerDragSnapped = false
     return
@@ -820,8 +823,11 @@ function onCornerRadiusDrag(id: string, radius: number, phase: 'start' | 'move' 
     store.snapshot('Corner radius')
     cornerDragSnapped = true
   }
-  const max = Math.max(...info.corners.map((c) => c.maxRadius))
-  store.setCornerRadius(id, Math.round(Math.min(radius, max) * 100) / 100)
+  const affected = only ? info.corners.filter((c) => only.includes(c.index)) : info.corners
+  if (!affected.length) return
+  const r = Math.round(Math.min(radius, Math.max(...affected.map((c) => c.maxRadius))) * 100) / 100
+  if (only) store.setNodeCornerRadius(id, only, r)
+  else store.setCornerRadius(id, r)
 }
 
 function canvasAnchors(id: string): { x: number; y: number }[] {
@@ -1107,8 +1113,6 @@ function commitExtend(id: string, nodes: PathNode[], closed: boolean) {
   const ab = o.artboardId ? store.getArtboard(o.artboardId) : null
   const payload = buildPenNodesPayload(nodes, ab, closed)
   if (!payload) return
-  const sx = o.baseWidth ? o.width / o.baseWidth : 1
-  const sy = o.baseHeight ? o.height / o.baseHeight : 1
   store.snapshot(closed ? 'Close path' : 'Extend path')
   store.updateObject(id, {
     d: payload.d,
@@ -1124,8 +1128,9 @@ function commitExtend(id: string, nodes: PathNode[], closed: boolean) {
     baseWidth: payload.width,
     baseHeight: payload.height,
     rotation: 0,
-    strokeWidth: (o.strokeWidth || 0) * Math.sqrt(Math.abs(sx * sy)),
   })
+  // Corners keep their rounding (the nodes carry their radii).
+  if (payload.nodes.some((n) => n.radius)) store.updatePathNodes(id, payload.nodes)
   store.selectObjects([id])
 }
 

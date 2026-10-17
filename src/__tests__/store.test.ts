@@ -277,6 +277,33 @@ describe('canvas store — resize + rotate', () => {
     expect((store.setCornerRadius(line.id, 5) as any).d).toBe('M0 0 L10 10')
   })
 
+  it('setNodeCornerRadius rounds only the chosen corners, on open paths too', () => {
+    const zig = store.addObject({ type: 'path', d: 'M0 100 L60 0 L120 100 L180 0', nodes: [{ x: 0, y: 100 }, { x: 60, y: 0 }, { x: 120, y: 100 }, { x: 180, y: 0 }], closed: false })
+    const out = store.setNodeCornerRadius(zig.id, [1], 10) as any
+    expect(out.nodes[1].radius).toBe(10)
+    expect(out.nodes[2].radius).toBeUndefined()
+    // One rounded corner: one curve, the other corner stays sharp.
+    expect((out.d.match(/C/g) || []).length).toBe(1)
+    // Rounding every corner again clears the per-corner override.
+    const all = store.setCornerRadius(zig.id, 5) as any
+    expect(all.nodes.every((n: any) => n.radius === undefined)).toBe(true)
+    expect((all.d.match(/C/g) || []).length).toBe(2)
+  })
+
+  it('a rectangle becomes four live corners when one corner is rounded', () => {
+    const rect = store.addObject({ type: 'path', shape: 'rect', width: 100, height: 60, d: 'M0 0 H100 V60 H0 Z' })
+    store.setCornerRadius(rect.id, 8)
+    const out = store.setNodeCornerRadius(rect.id, [2], 20) as any
+    expect(out.shape).toBeUndefined()
+    expect(out.nodes).toHaveLength(4)
+    expect(out.closed).toBe(true)
+    expect(out.cornerRadius).toBe(8)
+    // Four rounded corners, the bottom-right one larger.
+    expect((out.d.match(/C/g) || []).length).toBe(4)
+    expect(out.d).toContain('M0 8')
+    expect(out.d).toContain('L100 40')
+  })
+
   it('swapFillStroke swaps colors and gives a new stroke a width', () => {
     const o = store.addObject({ type: 'path', d: 'M0 0 H10 V10 Z', fill: '#ff0000', stroke: 'none', strokeWidth: 0 })
     store.swapFillStroke([o.id])

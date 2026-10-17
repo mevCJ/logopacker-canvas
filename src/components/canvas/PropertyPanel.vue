@@ -122,7 +122,47 @@
           <input type="number" min="0" step="0.5" class="pp-number" :value="selected.strokeWidth" @input="setStrokeWidth(num($event))" />
         </section>
 
-        <section v-if="selected.shape === 'rect'" class="pp-section">
+        <section class="pp-section pp-row-2">
+          <div>
+            <label class="pp-label">Cap</label>
+            <div class="pp-align">
+              <button
+                v-for="c in capOptions"
+                :key="c.value"
+                class="pp-align-btn pp-icon-btn"
+                :class="{ active: (selected.strokeLinecap || 'butt') === c.value }"
+                :title="c.title"
+                :aria-label="c.title"
+                @click="setStrokeStyle({ cap: c.value })"
+              >
+                <svg viewBox="0 0 18 14" width="18" height="14" aria-hidden="true">
+                  <line x1="2" y1="7" x2="10" y2="7" stroke="currentColor" stroke-width="6" :stroke-linecap="c.value" />
+                  <line x1="10" y1="1" x2="10" y2="13" stroke="#ef4444" stroke-width="1" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="pp-label">Corner</label>
+            <div class="pp-align">
+              <button
+                v-for="j in joinOptions"
+                :key="j.value"
+                class="pp-align-btn pp-icon-btn"
+                :class="{ active: (selected.strokeLinejoin || 'miter') === j.value }"
+                :title="j.title"
+                :aria-label="j.title"
+                @click="setStrokeStyle({ join: j.value })"
+              >
+                <svg viewBox="0 0 18 14" width="18" height="14" aria-hidden="true">
+                  <polyline points="4,13 4,4 15,4" fill="none" stroke="currentColor" stroke-width="5" :stroke-linejoin="j.value" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="maxCornerRadius > 0" class="pp-section">
           <label class="pp-label">Corner radius <span class="pp-value">{{ Math.round(selected.cornerRadius || 0) }}</span></label>
           <div class="pp-color-row">
             <input type="range" min="0" :max="maxCornerRadius" step="1" class="pp-range" :value="selected.cornerRadius || 0" @input="setCornerRadius(num($event))" />
@@ -274,10 +314,13 @@ import { createOutlines } from '@/services/canvas/textOutlines'
 import { applyPathfinder, type PathfinderOp } from '@/services/canvas/pathBoolean'
 import { vectorizeImageObject, VECTORIZE_DEFAULTS } from '@/services/canvas/vectorize'
 import { documentColors } from '@/services/canvas/documentColors'
+import { pathCorners } from '@/services/canvas/svgEngine'
 import {
   useCanvasStore,
   TEXT_ALIGNMENTS,
   SEMANTIC_ROLES,
+  type StrokeCap,
+  type StrokeJoin,
 } from '@/stores/canvas'
 
 const store = useCanvasStore()
@@ -416,11 +459,15 @@ const roleLabel = computed(() => {
   return r && r !== 'none' ? r : selected.value?.type || ''
 })
 
-// Corner radius is capped at half the rectangle's shorter (base) side.
+// Corner radius is capped at half the rectangle's shorter (base) side; a node
+// path's at the roundest any of its corners can get (0 when it has none).
 const maxCornerRadius = computed(() => {
   const o = selected.value
   if (!o || o.type !== 'path') return 0
-  return Math.floor(Math.min(o.baseWidth, o.baseHeight) / 2)
+  if (o.shape === 'rect') return Math.floor(Math.min(o.baseWidth, o.baseHeight) / 2)
+  if (!o.nodes?.length) return 0
+  const corners = pathCorners(o.nodes, !!o.closed, o.subpaths)
+  return corners.length ? Math.floor(Math.max(...corners.map((c) => c.maxRadius))) : 0
 })
 
 // Event value helpers keep the template terse while staying type-safe.
@@ -446,6 +493,22 @@ function setStrokeColor(v: string) {
 function setStrokeWidth(v: number) {
   if (!selected.value) return
   store.setStroke(selected.value.id, { strokeWidth: v })
+}
+// Illustrator's stroke Cap and Corner options.
+const capOptions: { value: StrokeCap; title: string }[] = [
+  { value: 'butt', title: 'Butt cap' },
+  { value: 'round', title: 'Round cap' },
+  { value: 'square', title: 'Projecting cap' },
+]
+const joinOptions: { value: StrokeJoin; title: string }[] = [
+  { value: 'miter', title: 'Miter join' },
+  { value: 'round', title: 'Round join' },
+  { value: 'bevel', title: 'Bevel join' },
+]
+function setStrokeStyle(patch: { cap?: StrokeCap; join?: StrokeJoin }) {
+  if (!selected.value) return
+  store.snapshot('Stroke style')
+  store.setStroke(selected.value.id, patch)
 }
 function setOpacity(v: number) {
   if (!selected.value) return
@@ -599,6 +662,12 @@ function fitArtboardToArtwork() {
   font-size: 12px;
   text-transform: capitalize;
   cursor: pointer;
+}
+.pp-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 0;
 }
 .pp-align-btn.active {
   background: #211a43;

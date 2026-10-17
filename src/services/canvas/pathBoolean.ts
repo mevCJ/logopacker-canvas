@@ -127,14 +127,13 @@ export interface PathStyle {
 }
 
 export function styleOf(obj: PathObject): PathStyle {
-  // Results are unscaled, so bake the source's scale into the stroke width.
-  const sx = obj.baseWidth ? obj.width / obj.baseWidth : 1
-  const sy = obj.baseHeight ? obj.height / obj.baseHeight : 1
+  // Strokes draw at their own width whatever the object's scale, so the
+  // width carries over unchanged.
   return {
     fill: obj.fill,
     fillGradient: obj.fillGradient,
     stroke: obj.stroke,
-    strokeWidth: (obj.strokeWidth || 0) * Math.sqrt(Math.abs(sx * sy)),
+    strokeWidth: obj.strokeWidth || 0,
     opacity: obj.opacity ?? 1,
     semanticRole: String(obj.semanticRole || 'none'),
     artboardId: obj.artboardId,
