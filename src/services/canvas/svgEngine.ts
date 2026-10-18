@@ -40,6 +40,8 @@ export interface RenderObject {
   // their geometry).
   flipX?: boolean
   flipY?: boolean
+  // Outside the isolated artwork in isolation mode: drawn faded.
+  dimmed?: boolean
   opacity?: number
   d?: string
   shape?: string
@@ -2659,6 +2661,9 @@ export class CanvasRenderer {
     // pointer (so they can't be clicked, dragged or picked by tools).
     el.attr('display', obj.hidden ? 'none' : null)
     el.attr('pointer-events', obj.locked ? 'none' : null)
+    // Isolation mode fades the rest of the artwork (style beats the opacity
+    // attribute without touching the object's own opacity).
+    ;(el.node as SVGElement).style.opacity = obj.dimmed ? String((obj.opacity ?? 1) * 0.3) : ''
 
     const rot = obj.rotation || 0
     const dispW = obj.width || 0

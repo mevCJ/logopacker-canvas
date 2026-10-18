@@ -289,6 +289,9 @@ export interface CanvasState {
   layers: Layer[]
   groups: Record<string, Group>
   activeLayerId: string | null
+  // Isolation mode (Illustrator): only these objects can be selected and
+  // edited; everything else is dimmed and locked. A view state, not undone.
+  isolation: { ids: string[] } | null
   selectedIds: string[]
   selectedArtboardId: string | null
   viewport: { x: number; y: number; zoom: number }
@@ -406,6 +409,7 @@ export const useCanvasStore = defineStore('canvas', {
     layers: [],
     groups: {},
     activeLayerId: null,
+    isolation: null,
     selectedIds: [],
     selectedArtboardId: null,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -629,6 +633,8 @@ export const useCanvasStore = defineStore('canvas', {
       this.objects[id] = obj
       this.objectOrder.push(id)
       this._sortByLayers()
+      // Artwork made while isolated belongs to what's being edited.
+      if (this.isolation) this.isolation.ids.push(id)
 
       if (artboardId) {
         const artboard = this.getArtboard(artboardId)
@@ -692,6 +698,7 @@ export const useCanvasStore = defineStore('canvas', {
       const gid = obj.groupId
       delete this.objects[id]
       if (gid) this._pruneGroups()
+      this._pruneIsolation()
       return true
     },
 
@@ -1219,7 +1226,29 @@ export const useCanvasStore = defineStore('canvas', {
       return !!o.hidden || !!this.layerOf(o)?.hidden
     },
     isLocked(o: CanvasObject): boolean {
-      return !!o.locked || !!this.layerOf(o)?.locked
+      return !!o.locked || !!this.layerOf(o)?.locked || this.isOutsideIsolation(o)
+    },
+
+    // ---- Isolation mode -----------------------------------------------------
+    isOutsideIsolation(o: CanvasObject): boolean {
+      return !!this.isolation && !this.isolation.ids.includes(o.id)
+    },
+    // Isolate objects: everything else dims and can't be picked until exit.
+    enterIsolation(ids: string[]): boolean {
+      const keep = ids.filter((id) => this.objects[id])
+      if (!keep.length) return false
+      this.isolation = { ids: keep }
+      this.selectObjects(keep)
+      return true
+    },
+    exitIsolation(): void {
+      this.isolation = null
+    },
+    // Drop ids that no longer exist; leave isolation when none remain.
+    _pruneIsolation(): void {
+      if (!this.isolation) return
+      this.isolation.ids = this.isolation.ids.filter((id) => this.objects[id])
+      if (!this.isolation.ids.length) this.isolation = null
     },
     // The active layer, creating "Layer 1" for an empty document.
     ensureActiveLayer(): Layer {
@@ -1584,6 +1613,7 @@ export const useCanvasStore = defineStore('canvas', {
       this.groups = JSON.parse(JSON.stringify(state.groups || {}))
       this.activeLayerId = state.activeLayerId && this.getLayer(state.activeLayerId) ? state.activeLayerId : (this.layers.at(-1)?.id ?? null)
       this.selectedIds = (state.selectedIds || []).filter((id) => !!this.objects[id])
+      this._pruneIsolation()
       const abId = state.selectedArtboardId || null
       this.selectedArtboardId = abId && this.getArtboard(abId) ? abId : null
     },
@@ -1656,6 +1686,7 @@ export const useCanvasStore = defineStore('canvas', {
       this.objectOrder = order
       this.selectedIds = []
       this.selectedArtboardId = null
+      this.isolation = null
       // Layers and groups: keep well-formed entries; older documents get one
       // layer holding everything.
       this.layers = (Array.isArray(doc.layers) ? doc.layers : [])

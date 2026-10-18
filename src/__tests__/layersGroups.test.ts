@@ -163,3 +163,27 @@ describe('groups', () => {
     expect(store.groupMembers(gid).every((m) => store.getObject(m)!.layerId === top.id)).toBe(true)
   })
 })
+
+describe('isolation mode', () => {
+  it('locks everything outside the isolated objects until exit', () => {
+    const a = sq('a')
+    const b = sq('b')
+    expect(store.enterIsolation([a.id])).toBe(true)
+    expect(store.selectedIds).toEqual([a.id])
+    expect(store.isLocked(store.getObject(b.id)!)).toBe(true)
+    expect(store.selectObjects([a.id, b.id])).toEqual([a.id])
+    // Artwork made while isolated joins it.
+    const c = sq('c')
+    expect(store.isLocked(c)).toBe(false)
+    store.exitIsolation()
+    expect(store.isLocked(store.getObject(b.id)!)).toBe(false)
+  })
+
+  it('ends when the isolated artwork is gone', () => {
+    const a = sq('a')
+    sq('b')
+    store.enterIsolation([a.id])
+    store.removeObject(a.id)
+    expect(store.isolation).toBeNull()
+  })
+})

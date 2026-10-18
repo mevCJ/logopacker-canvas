@@ -25,12 +25,20 @@
       @keyup="recordLetterSelection"
       @mouseup="recordLetterSelection"
     ></textarea>
-    <div v-if="toolHint" class="tool-hint">{{ toolHint }}</div>
+    <!-- Isolation mode bar (Illustrator's): where you are, and the way out. -->
+    <div v-if="isolation" class="isolation-bar" @mousedown.stop @dblclick.stop>
+      <button type="button" class="iso-back" title="Exit isolation mode (Esc)" aria-label="Exit isolation mode" @click="store.exitIsolation()">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+      </button>
+      <span class="iso-label">Isolation mode</span>
+      <span v-for="(c, i) in isolationCrumbs" :key="i" class="iso-crumb">{{ c }}</span>
+    </div>
+    <div v-if="toolHint" class="tool-hint" :class="{ 'below-bar': isolation }">{{ toolHint }}</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch, nextTick } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   useCanvasStore,
@@ -95,8 +103,24 @@ import { isNonePaint } from '@/services/canvas/color'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const store = useCanvasStore()
-const { artboards, objects, objectOrder, layers, selectedIds, selectedArtboardId, activeTool, viewMode } =
+const { artboards, objects, objectOrder, layers, isolation, selectedIds, selectedArtboardId, activeTool, viewMode } =
   storeToRefs(store)
+
+// Isolation bar trail: layer › group(s) › the isolated object.
+const isolationCrumbs = computed(() => {
+  const iso = isolation.value
+  const first = iso ? store.getObject(iso.ids[0]!) : null
+  if (!iso || !first) return []
+  const crumbs: string[] = [store.layerOf(first)?.name ?? 'Layer']
+  const chain: string[] = []
+  for (let g = first.groupId; g && store.groups[g]; g = store.groups[g]!.parentId) chain.unshift(store.groups[g]!.name || 'Group')
+  crumbs.push(...chain)
+  if (iso.ids.length === 1) {
+    const o = first
+    crumbs.push(o.name || (o.type === 'text' ? o.text?.trim() || 'Text' : o.type === 'path' ? (o.shape ? o.shape[0]!.toUpperCase() + o.shape.slice(1) : 'Path') : 'Image'))
+  } else crumbs.push(`${iso.ids.length} objects`)
+  return crumbs
+})
 
 // One-line contextual hint shown at the top of the stage for tools that need
 // a precondition (e.g. the shape builder needs overlapping shapes selected).
@@ -293,10 +317,22 @@ function onInlineKeydown(e: KeyboardEvent) {
 function snapshot() {
   return {
     artboards: JSON.parse(JSON.stringify(store.artboards)),
-    // Layer visibility and lock applied.
-    objects: store.renderObjects(),
+    // Layer visibility and lock applied; in isolation mode everything else is
+    // dimmed and locked.
+    objects: isolationApplied(store.renderObjects()),
     objectOrder: [...store.objectOrder],
   }
+}
+
+function isolationApplied(objs: Record<string, any>): Record<string, any> {
+  const iso = store.isolation
+  if (!iso) return objs
+  for (const o of Object.values(objs)) {
+    if (iso.ids.includes(o.id)) continue
+    o.locked = true
+    o.dimmed = true
+  }
+  return objs
 }
 
 function rerender() {
@@ -455,6 +491,13 @@ function wireObject(obj: RenderObject, el: any) {
     if (store.activeTool === 'select' && o.groupId && !alone) {
       e.stopPropagation()
       store.selectObjects([o.id])
+      return
+    }
+    // Then (or straight away, outside a group) a double-click isolates the
+    // object; text is edited instead.
+    if (store.activeTool === 'select' && o.type !== 'text') {
+      e.stopPropagation()
+      if (!store.isolation?.ids.includes(o.id)) store.enterIsolation([o.id])
       return
     }
     // Double-click text with the selection tools to edit it in place.
@@ -1234,6 +1277,11 @@ function onStageMouseLeave() {
 }
 
 function onStageDblClick(e: MouseEvent) {
+  // Double-clicking empty canvas leaves isolation mode.
+  if (store.isolation && store.activeTool === 'select' && !(e.target as Element).closest?.('.canvas-object:not([pointer-events="none"])')) {
+    store.exitIsolation()
+    return
+  }
   if (store.activeTool !== 'pen' || !penNodes) return
   e.preventDefault()
   finishPen(false)
@@ -1779,6 +1827,13 @@ function onKeyDown(e: KeyboardEvent) {
     }
   }
 
+  // Escape leaves isolation mode first.
+  if (e.key === 'Escape' && store.isolation) {
+    e.preventDefault()
+    store.exitIsolation()
+    return
+  }
+
   // Escape returns to the Select tool (and closes any transient state).
   if (e.key === 'Escape' && store.activeTool !== 'select') {
     e.preventDefault()
@@ -1941,7 +1996,7 @@ onBeforeUnmount(() => {
 
 // Layers too: a hidden or locked layer changes how its objects render.
 watch(
-  [artboards, objects, objectOrder, layers],
+  [artboards, objects, objectOrder, layers, isolation],
   () => {
     rerender()
   },
@@ -2084,6 +2139,50 @@ defineExpose({ rerender, fitViewBox, getRenderer: () => renderer })
 .canvas-stage.tool-pen :deep(path.canvas-object:not([pointer-events='none'])),
 .canvas-stage.tool-node :deep(path.canvas-object:not([pointer-events='none'])) {
   pointer-events: all;
+}
+.isolation-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  background: rgba(228, 228, 231, 0.96);
+  border-bottom: 1px solid #d4d4d8;
+  font-size: 12px;
+  color: #3f3f46;
+}
+.iso-back {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #211a43;
+  cursor: pointer;
+  padding: 0;
+}
+.iso-back:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+.iso-label {
+  font-weight: 600;
+  color: #211a43;
+}
+.iso-crumb::before {
+  content: '›';
+  margin-right: 8px;
+  color: #a1a1aa;
+}
+.tool-hint.below-bar {
+  top: 42px;
 }
 .tool-hint {
   position: absolute;
