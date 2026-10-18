@@ -8,6 +8,7 @@
 import {
   absolutePosition,
   axisScale,
+  runAttrs,
   objectFlip,
   displayPathData,
   pathAttrs,
@@ -18,7 +19,8 @@ import {
   type RenderObject,
 } from './svgEngine'
 import { gradientId, gradientMarkup } from './gradient'
-import { layoutAreaText } from './textLayout'
+import { layoutAreaText, POINT_LEADING } from './textLayout'
+import { textRuns } from './textStyle'
 
 // Loose artboard shape (a subset of the store's Artboard) needed for export.
 export interface ExportArtboard {
@@ -49,6 +51,17 @@ export interface ExportSet {
 
 // Escape a string for safe inclusion in XML text content or a double-quoted
 // attribute value. Handles the five predefined XML entities.
+// Letter runs of text[start…] as markup: plain letters as text, styled ones
+// in a <tspan> with their color / letter spacing.
+function runsMarkup(obj: RenderObject, text: string, start: number): string {
+  return textRuns(text, start, obj.charStyles)
+    .map((r) => {
+      const a = runAttrs(r.style, obj.fontSize || 24)
+      return Object.keys(a).length ? `<tspan${serializeAttrs(a)}>${escapeXml(r.text)}</tspan>` : escapeXml(r.text)
+    })
+    .join('')
+}
+
 export function escapeXml(value: unknown): string {
   const s = value == null ? '' : String(value)
   return s
@@ -101,7 +114,7 @@ export function objectSvgMarkup(
       const t = objectTransform(pos.x, pos.y, dispW, dispH, rot, 1, 1, dispW / 2, dispH / 2, objectFlip(obj))
       const attrs = serializeAttrs({ ...textAttrs(obj), transform: t, 'xml:space': 'preserve' })
       const tspans = layoutAreaText(obj)
-        .lines.map((l) => `<tspan x="${l.x}" y="${l.y}">${escapeXml(l.text)}</tspan>`)
+        .lines.map((l) => `<tspan x="${l.x}" y="${l.y}">${runsMarkup(obj, l.text, l.start)}</tspan>`)
         .join('')
       return `<text${attrs}>${tspans}</text>`
     }
@@ -113,7 +126,7 @@ export function objectSvgMarkup(
       const tp = serializeAttrs({ href: `#${pathId}`, startOffset: `${obj.pathOffset ?? 0}%` })
       return (
         `<defs><path${serializeAttrs({ id: pathId, d: obj.pathD })} /></defs>` +
-        `<text${attrs}><textPath${tp}>${escapeXml(obj.text || '')}</textPath></text>`
+        `<text${attrs}><textPath${tp}>${runsMarkup(obj, obj.text || '', 0)}</textPath></text>`
       )
     }
     const attrs = serializeAttrs({
@@ -121,8 +134,17 @@ export function objectSvgMarkup(
       x: 0,
       y: obj.fontSize || 24,
       transform,
+      'xml:space': 'preserve',
     })
-    return `<text${attrs}>${escapeXml(obj.text || '')}</text>`
+    // One line <tspan> per line, POINT_LEADING apart, as on the canvas.
+    const size = obj.fontSize || 24
+    let offset = 0
+    const lines = (obj.text || '').split('\n').map((line, i) => {
+      const inner = line ? runsMarkup(obj, line, offset) : ' '
+      offset += line.length + 1
+      return `<tspan x="0" dy="${i ? size * POINT_LEADING : 0}">${inner}</tspan>`
+    })
+    return `<text${attrs}>${lines.join('')}</text>`
   }
 
   // image

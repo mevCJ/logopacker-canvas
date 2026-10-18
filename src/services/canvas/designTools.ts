@@ -529,6 +529,41 @@ export function buildDesignTools(
       },
     },
     {
+      name: 'style_letters',
+      description:
+        'Styles individual letters of a text object: the characters [start, end) (0-based, end exclusive) get their own fill color and/or letter spacing (tracking, 1/1000 em after each letter). reset: true removes those letters\' own styles instead. Use update_objects with tracking for the whole text.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          start: { type: 'number' },
+          end: { type: 'number' },
+          fill: { type: 'string', description: 'Color as #RRGGBB or rgba().' },
+          tracking: { type: 'number' },
+          reset: { type: 'boolean' },
+        },
+        required: ['id', 'start', 'end'],
+      },
+      execute(input: { id: string; start: number; end: number; fill?: string; tracking?: number; reset?: boolean }) {
+        const o = store.getObject(input.id)
+        if (!o || o.type !== 'text') return fail('Style letters', new Error(`No text object ${input.id}`))
+        const len = (o.text || '').length
+        const start = Math.max(0, Math.floor(input.start))
+        const end = Math.min(len, Math.floor(input.end))
+        if (end <= start) return fail('Style letters', new Error(`Empty range ${input.start}–${input.end} (text has ${len} characters).`))
+        store.snapshot('Style letters')
+        if (input.reset) store.clearLetterStyles(o.id, start, end)
+        else {
+          const patch: { fill?: string; tracking?: number } = {}
+          if (input.fill !== undefined) patch.fill = input.fill
+          if (input.tracking !== undefined) patch.tracking = Math.round(input.tracking)
+          store.setLetterStyle(o.id, start, end, patch)
+        }
+        log(`Styled letters “${(o.text || '').slice(start, end)}”`)
+        return text({ id: o.id, letters: (o.text || '').slice(start, end), charStyles: (store.getObject(o.id) as { charStyles?: unknown }).charStyles ?? null })
+      },
+    },
+    {
       name: 'text_on_path',
       description:
         'Type on a path: converts a path object into the guide of a new text object whose glyphs flow along it (e.g. curved/circular wordmarks). The path is replaced by the text.',

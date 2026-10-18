@@ -6,6 +6,7 @@ import { rectPathData, rotatePoint, nodesToPathData, nodesBounds, roundedPathDat
 import type { Box, PathNode } from '@/services/canvas/svgEngine'
 import type { GradientFill } from '@/services/canvas/gradient'
 import { isNonePaint } from '@/services/canvas/color'
+import { clearCharStyles, normalizeCharStyles, remapCharStyles, setCharStyle, type CharStyle, type CharStyles } from '@/services/canvas/textStyle'
 import { flattenSubpaths, parsePathData } from '@/services/canvas/svgToPaths'
 
 // ---------------------------------------------------------------------------
@@ -183,6 +184,11 @@ export interface TextObject extends BaseObject {
   area?: boolean
   // Line spacing as a multiple of the font size (default 1.2).
   lineHeight?: number
+  // Letter spacing in 1/1000 em (Illustrator's tracking).
+  tracking?: number
+  // Per-letter overrides (color, letter spacing), one entry per character;
+  // see textStyle.ts. Kept aligned with `text` as it's edited.
+  charStyles?: CharStyles
   // Text on a path: when set, glyphs flow along this path (in the text's local
   // frame) instead of a straight baseline. `pathOffset` is the start offset
   // along the path in percent (0..100).
@@ -645,7 +651,27 @@ export const useCanvasStore = defineStore('canvas', {
         this.assignToArtboard(id, rest.artboardId as string | null)
         delete rest.artboardId
       }
+      // Editing the text keeps each letter's own style on that letter.
+      if (obj.type === 'text' && typeof rest.text === 'string' && rest.charStyles === undefined && obj.charStyles) {
+        rest.charStyles = remapCharStyles(obj.text || '', rest.text, obj.charStyles)
+      }
       Object.assign(obj, rest)
+      return obj
+    },
+
+    // Style letters [start, end) of a text object: color and/or letter
+    // spacing (1/1000 em) of just those letters.
+    setLetterStyle(id: string, start: number, end: number, patch: CharStyle): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj || obj.type !== 'text' || end <= start) return null
+      obj.charStyles = setCharStyle(obj.charStyles, (obj.text || '').length, start, end, patch)
+      return obj
+    },
+    // Remove letter styles from [start, end), or from every letter.
+    clearLetterStyles(id: string, start?: number, end?: number): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj || obj.type !== 'text') return null
+      obj.charStyles = clearCharStyles(obj.charStyles, (obj.text || '').length, start, end)
       return obj
     },
 
@@ -918,8 +944,29 @@ export const useCanvasStore = defineStore('canvas', {
 
     // ---- Style helpers -----------------------------------------------------
     // A solid fill replaces any gradient (as picking a color does in Illustrator).
+    // On text it recolors every letter, replacing letter colors.
     setFill(id: string, fill: string): CanvasObject | null {
+      this._dropLetterKey(id, 'fill')
       return this.updateObject(id, { fill, fillGradient: undefined })
+    },
+    // Letter spacing of a whole text object (1/1000 em), replacing the
+    // spacing of individual letters.
+    setTracking(id: string, tracking: number): CanvasObject | null {
+      const obj = this.objects[id]
+      if (!obj || obj.type !== 'text') return null
+      this._dropLetterKey(id, 'tracking')
+      obj.tracking = Math.round(tracking) || undefined
+      return obj
+    },
+    _dropLetterKey(id: string, key: keyof CharStyle): void {
+      const obj = this.objects[id]
+      if (!obj || obj.type !== 'text' || !obj.charStyles) return
+      const next = obj.charStyles.map((st) => {
+        if (!st || st[key] === undefined) return st
+        const { [key]: _drop, ...rest } = st
+        return rest
+      })
+      obj.charStyles = normalizeCharStyles(next, (obj.text || '').length)
     },
     // Set (or clear, with null) an object's gradient fill. Images have none.
     setFillGradient(id: string, gradient: GradientFill | null): CanvasObject | null {

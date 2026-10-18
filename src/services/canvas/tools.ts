@@ -94,7 +94,7 @@ const COMMON_PROPS = [
 
 const TYPE_PROPS: Record<string, readonly string[]> = {
   path: ['d', 'fill', 'stroke', 'strokeWidth', 'strokeLinecap', 'strokeLinejoin', 'cornerRadius'],
-  text: ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align', 'pathOffset', 'area', 'lineHeight'],
+  text: ['text', 'fontFamily', 'fontSize', 'fontWeight', 'fill', 'align', 'pathOffset', 'area', 'lineHeight', 'tracking'],
   image: ['href', 'sourceUrl', 'alt'],
 }
 
@@ -130,6 +130,12 @@ function applyProps(
     if (value === undefined || !allowed.has(key)) continue
     if (key === 'cornerRadius') {
       store.setCornerRadius(o.id, Number(value))
+      applied.push(key)
+      continue
+    }
+    // Whole-object tracking replaces per-letter spacing.
+    if (key === 'tracking') {
+      store.setTracking(o.id, Number(value))
       applied.push(key)
       continue
     }
@@ -518,7 +524,7 @@ export function buildCanvasTools(
         'Returns the current values of every editable property for an object, plus the list of property names you may set for that object type. Call this before set_object_properties so you know which keys are valid. ' +
         'Common (all types): x, y, width, height, rotation, opacity, semanticRole, artboardId. ' +
         'path: d, fill, stroke, strokeWidth, strokeLinecap (butt|round|square), strokeLinejoin (miter|round|bevel), cornerRadius (rectangles only). ' +
-        'text: text, fontFamily, fontSize, fontWeight, fill, align. ' +
+        'text: text, fontFamily, fontSize, fontWeight, fill, align, tracking (letter spacing, 1/1000 em). ' +
         'image: href, sourceUrl, alt.',
       inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       execute({ id }: { id: string }) {
@@ -534,7 +540,7 @@ export function buildCanvasTools(
         'Sets any editable properties on one or more objects, targeted by ids or semanticRole. Pass a `properties` object with the keys to change; only keys valid for each object type are applied (unknown/invalid keys are ignored). Use get_object_properties first to see which keys are valid. ' +
         'Common (all types): x, y, width, height, rotation, opacity, semanticRole, artboardId. ' +
         'path: d, fill, stroke, strokeWidth, strokeLinecap (butt|round|square), strokeLinejoin (miter|round|bevel), cornerRadius (rectangles only, regenerates the path). ' +
-        'text: text, fontFamily, fontSize, fontWeight, fill, align. ' +
+        'text: text, fontFamily, fontSize, fontWeight, fill, align, tracking (letter spacing, 1/1000 em). ' +
         'image: href, sourceUrl, alt.',
       inputSchema: {
         type: 'object',

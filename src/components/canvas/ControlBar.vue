@@ -74,6 +74,8 @@
           </select>
           <input type="number" min="1" class="cb-num cb-num-s" title="Font size (Shift+Cmd/Ctrl+> / <)" :value="single.fontSize" @change="updateSingle({ fontSize: Math.max(1, num($event)) })" />
           <span class="cb-unit">pt</span>
+          <span class="cb-label cb-tracking" title="Tracking: letter spacing in 1/1000 em">VA</span>
+          <input type="number" step="10" class="cb-num cb-num-s" title="Tracking (1/1000 em)" :value="single.tracking || 0" @change="setTracking(num($event))" />
         </div>
         <button type="button" class="cb-btn" title="Convert to vector paths (Shift+Cmd/Ctrl+O)" @click="outlines">Create Outlines</button>
       </template>
@@ -266,6 +268,11 @@ function setOpacity(pct: number) {
   const v = Math.min(100, Math.max(0, pct)) / 100
   for (const o of objects.value) store.setOpacity(o.id, v)
 }
+function setTracking(v: number) {
+  if (!single.value) return
+  store.snapshot('Tracking')
+  store.setTracking(single.value.id, v)
+}
 function updateSingle(patch: Record<string, unknown>) {
   if (!single.value) return
   store.snapshot('Edit')
@@ -362,6 +369,11 @@ function addArtboard() {
 </script>
 
 <style scoped>
+.cb-tracking {
+  margin-left: 6px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
 .cb {
   display: flex;
   align-items: center;

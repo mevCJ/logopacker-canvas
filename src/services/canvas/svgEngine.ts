@@ -12,7 +12,8 @@ import svgpath from 'svgpath'
 import '@svgdotjs/svg.draggable.js'
 import { splitPaint } from './color'
 import { gradientId, gradientMarkup, type GradientFill } from './gradient'
-import { layoutAreaText } from './textLayout'
+import { layoutAreaText, POINT_LEADING } from './textLayout'
+import { textRuns, trackingPx, type CharStyle, type CharStyles } from './textStyle'
 import type { Guide } from './snapEngine'
 
 export interface Box {
@@ -59,6 +60,8 @@ export interface RenderObject {
   href?: string
   pathD?: string
   pathOffset?: number
+  tracking?: number
+  charStyles?: CharStyles
   area?: boolean
   lineHeight?: number
   fillGradient?: GradientFill
@@ -181,8 +184,19 @@ export function textAttrs(obj: RenderObject): Record<string, string | number> {
     'font-weight': normalizeFontWeight(obj.fontWeight),
     ...fillAttrs(obj, '#000000'),
     'text-anchor': alignToAnchor(obj.align),
+    // Letter spacing (tracking); letters with their own spacing override it.
+    'letter-spacing': trackingPx(obj.tracking, obj.fontSize || 24),
     opacity: obj.opacity == null ? 1 : obj.opacity,
   }
+}
+
+// Attributes of a styled letter run: its own color and/or letter spacing.
+export function runAttrs(style: CharStyle | null, fontSize: number): Record<string, string | number> {
+  const out: Record<string, string | number> = {}
+  if (!style) return out
+  if (style.fill !== undefined) Object.assign(out, paintAttrs('fill', style.fill, 'none'))
+  if (style.tracking !== undefined) out['letter-spacing'] = trackingPx(style.tracking, fontSize)
+  return out
 }
 
 export function alignToAnchor(align: string | undefined): 'start' | 'middle' | 'end' {
@@ -1193,6 +1207,7 @@ export class CanvasRenderer {
   draw: SvgEl
   artboardLayer: SvgEl
   objectLayer: SvgEl
+  letterLayer: SvgEl
   overlayLayer: SvgEl
   handleLayer: SvgEl
   hoverLayer: SvgEl
@@ -1248,6 +1263,8 @@ export class CanvasRenderer {
     this.draw = SVG().addTo(mountEl).size('100%', '100%')
     this.artboardLayer = this.draw.group().addClass('artboard-layer')
     this.objectLayer = this.draw.group().addClass('object-layer')
+    // Highlight of the letters picked in a text object (see setLetterHighlight).
+    this.letterLayer = this.draw.group().addClass('letter-layer').attr({ 'pointer-events': 'none' })
     this.overlayLayer = this.draw.group().addClass('overlay-layer')
     // Interactive resize/rotate handles for the selected object. Separate from
     // overlayLayer because those outlines are pointer-events:none.
@@ -1286,6 +1303,68 @@ export class CanvasRenderer {
   render(snapshot: RenderSnapshot): void {
     this._renderArtboards(snapshot.artboards || [])
     this._renderObjects(snapshot)
+    this._drawLetterHighlight()
+  }
+
+  // ---- Letter selection --------------------------------------------------
+  // Letters [start, end) of a text object picked for styling: tinted so the
+  // selection stays visible after the text editor closes.
+  private _letterSel: { id: string; start: number; end: number } | null = null
+  setLetterHighlight(sel: { id: string; start: number; end: number } | null): void {
+    this._letterSel = sel && sel.end > sel.start ? { ...sel } : null
+    this._drawLetterHighlight()
+  }
+  private _drawLetterHighlight(): void {
+    this.letterLayer.clear()
+    const sel = this._letterSel
+    const el = sel ? this._objectEls.get(sel.id) : null
+    if (!sel || !el || el.attr('display') === 'none') return
+    const g = this.letterLayer.group().attr({ transform: el.attr('transform') })
+    for (const t of (el.node as Element).querySelectorAll('tspan[data-start]')) {
+      const s0 = Number(t.getAttribute('data-start'))
+      const n = (t.textContent || '').length
+      for (let i = Math.max(sel.start, s0); i < Math.min(sel.end, s0 + n); i++) {
+        try {
+          const r = (t as SVGTextContentElement).getExtentOfChar(i - s0)
+          g.rect(r.width, r.height).move(r.x, r.y).fill({ color: '#2563eb', opacity: 0.25 })
+        } catch {
+          /* not rendered (overflowed area type) */
+        }
+      }
+    }
+  }
+
+  // Fill a text-content element with letter runs of text[start…], each a
+  // <tspan> carrying its style and where it starts in the text.
+  private _appendRuns(parent: Element, text: string, start: number, obj: RenderObject): void {
+    const NS = 'http://www.w3.org/2000/svg'
+    for (const run of textRuns(text, start, obj.charStyles)) {
+      const t = document.createElementNS(NS, 'tspan')
+      t.setAttribute('data-start', String(run.start))
+      for (const [k, v] of Object.entries(runAttrs(run.style, obj.fontSize || 24))) t.setAttribute(k, String(v))
+      t.textContent = run.text
+      parent.appendChild(t)
+    }
+  }
+
+  // Point type: one line <tspan> per line of text (POINT_LEADING apart), each
+  // holding its letter runs.
+  private _applyPointText(obj: RenderObject, el: SvgEl): void {
+    const NS = 'http://www.w3.org/2000/svg'
+    const node = el.node as SVGTextElement
+    const size = obj.fontSize || 24
+    node.textContent = ''
+    let offset = 0
+    ;(obj.text || '').split('\n').forEach((line, i) => {
+      const lt = document.createElementNS(NS, 'tspan')
+      lt.setAttribute('x', '0')
+      lt.setAttribute('dy', String(i ? size * POINT_LEADING : 0))
+      if (line) this._appendRuns(lt, line, offset, obj)
+      else lt.textContent = ' ' // an empty line still takes its height
+      node.appendChild(lt)
+      offset += line.length + 1
+    })
+    node.style.whiteSpace = 'pre'
   }
 
   setViewBox(box: Box): void {
@@ -2478,7 +2557,7 @@ export class CanvasRenderer {
       const t = document.createElementNS(NS, 'tspan')
       t.setAttribute('x', String(line.x))
       t.setAttribute('y', String(line.y))
-      t.textContent = line.text
+      this._appendRuns(t, line.text, line.start, obj)
       node.appendChild(t)
     }
     node.removeAttribute('x')
@@ -2520,7 +2599,8 @@ export class CanvasRenderer {
     }
     tp.setAttribute('href', `#${defId}`)
     tp.setAttribute('startOffset', `${obj.pathOffset ?? 0}%`)
-    if (tp.textContent !== (obj.text || '')) tp.textContent = obj.text || ''
+    tp.textContent = ''
+    this._appendRuns(tp, obj.text || '', 0, obj)
     // Positioning comes from the path; a baseline x/y would offset the glyphs.
     node.removeAttribute('x')
     node.removeAttribute('y')
@@ -2595,7 +2675,7 @@ export class CanvasRenderer {
       const onPath = this._applyTextPath(obj, el)
       const isArea = !onPath && !!obj.area
       if (isArea) this._applyAreaText(obj, el)
-      else if (!onPath) el.text(obj.text || '')
+      else if (!onPath) this._applyPointText(obj, el)
       el.attr(textAttrs(obj))
       // Area type is clickable anywhere over its text block, not just glyphs.
       if (isArea && !obj.locked) el.attr('pointer-events', 'bounding-box')

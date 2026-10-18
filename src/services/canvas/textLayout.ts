@@ -9,7 +9,11 @@
 // wrap using measured advance widths) and rendered as one <tspan> per line.
 // The live renderer and SVG export share this so they wrap identically.
 
+import { charTrackingPx, type CharStyles } from './textStyle'
+
 export const DEFAULT_LINE_HEIGHT = 1.2
+// Line spacing of point type (multi-line text you click to place).
+export const POINT_LEADING = 1.3
 
 export interface FontSpec {
   family: string
@@ -45,49 +49,83 @@ export function measureText(text: string, font: FontSpec): number {
   return text.length * font.size * 0.55
 }
 
+// A wrapped line and where it starts in the source text.
+export interface WrappedLine {
+  text: string
+  start: number
+}
+
 // Break text into lines no wider than `width`. Hard line breaks are kept;
-// words wider than the box are split by character.
-export function wrapText(text: string, width: number, font: FontSpec, measure: MeasureText = measureText): string[] {
-  const lines: string[] = []
+// words wider than the box are split by character. `extra(i)` adds width
+// after character i (letter spacing).
+export function wrapTextRanges(
+  text: string,
+  width: number,
+  font: FontSpec,
+  measure: MeasureText = measureText,
+  extra?: (index: number) => number,
+): WrappedLine[] {
+  const lines: WrappedLine[] = []
   const maxW = Math.max(1, width)
+  const widthAt = (start: number, s: string) => {
+    let w = measure(s, font)
+    if (extra) for (let k = 0; k < s.length; k++) w += extra(start + k)
+    return w
+  }
+  let paraStart = 0
   for (const para of text.split('\n')) {
+    const base = paraStart
+    paraStart += para.length + 1
     if (para === '') {
-      lines.push('')
+      lines.push({ text: '', start: base })
       continue
     }
     // Keep the spaces attached to the preceding word so wrapping is stable.
-    const words = para.match(/\S+\s*|\s+/g) ?? ['']
+    const re = /\S+\s*|\s+/g
     let line = ''
-    for (const word of words) {
+    let lineStart = base
+    let m: RegExpExecArray | null
+    while ((m = re.exec(para))) {
+      const word = m[0]
+      const wordStart = base + m.index
+      if (!line) lineStart = wordStart
       const candidate = line + word
-      if (measure(candidate.trimEnd(), font) <= maxW) {
+      if (widthAt(lineStart, candidate.trimEnd()) <= maxW) {
         line = candidate
         continue
       }
       // Doesn't fit: end the current line and start the word on a new one.
-      if (line.trim() !== '') lines.push(line.trimEnd())
+      if (line.trim() !== '') lines.push({ text: line.trimEnd(), start: lineStart })
       line = ''
       if (word.trim() === '') continue // whitespace at a wrap point is dropped
-      if (measure(word.trimEnd(), font) <= maxW) {
+      lineStart = wordStart
+      if (widthAt(wordStart, word.trimEnd()) <= maxW) {
         line = word
         continue
       }
       // A single word wider than the box: break it by characters.
-      for (const ch of word) {
-        if (line && measure((line + ch).trimEnd(), font) > maxW) {
-          lines.push(line)
+      for (let k = 0; k < word.length; k++) {
+        const ch = word[k]!
+        if (line && widthAt(lineStart, (line + ch).trimEnd()) > maxW) {
+          lines.push({ text: line, start: lineStart })
           line = ''
+          lineStart = wordStart + k
         }
         line += ch
       }
     }
-    lines.push(line.trimEnd())
+    lines.push({ text: line.trimEnd(), start: line ? lineStart : base + para.length })
   }
   return lines
 }
 
+export function wrapText(text: string, width: number, font: FontSpec, measure: MeasureText = measureText): string[] {
+  return wrapTextRanges(text, width, font, measure).map((l) => l.text)
+}
+
 export interface AreaLine {
   text: string
+  start: number // index of the line's first character in the text
   x: number
   y: number // baseline
 }
@@ -106,6 +144,8 @@ export interface AreaTextInput {
   fontWeight?: number | string
   align?: string
   lineHeight?: number
+  tracking?: number
+  charStyles?: CharStyles
 }
 
 // Lines that fit in the box, with their positions in the box's local frame.
@@ -117,15 +157,17 @@ export function layoutAreaText(obj: AreaTextInput, measure: MeasureText = measur
   const width = obj.width || 0
   const height = obj.height || 0
   const lead = size * (obj.lineHeight || DEFAULT_LINE_HEIGHT)
-  const all = wrapText(obj.text || '', width, font, measure)
+  const spaced = !!obj.tracking || !!obj.charStyles
+  const extra = spaced ? (i: number) => charTrackingPx(i, obj.charStyles, obj.tracking, size) : undefined
+  const all = wrapTextRanges(obj.text || '', width, font, measure, extra)
   const x = obj.align === 'center' ? width / 2 : obj.align === 'right' ? width : 0
   const lines: AreaLine[] = []
   for (let i = 0; i < all.length; i++) {
     const y = size + i * lead
     if (y + size * 0.25 > height) break
-    lines.push({ text: all[i]!, x, y })
+    lines.push({ text: all[i]!.text, start: all[i]!.start, x, y })
   }
   // Trailing empty lines don't count as overflow.
-  const overflow = all.slice(lines.length).some((l) => l.trim() !== '')
+  const overflow = all.slice(lines.length).some((l) => l.text.trim() !== '')
   return { lines, overflow }
 }

@@ -21,6 +21,9 @@
       @input="fitInlineSize"
       @blur="commitInlineEdit"
       @keydown="onInlineKeydown"
+      @select="recordLetterSelection"
+      @keyup="recordLetterSelection"
+      @mouseup="recordLetterSelection"
     ></textarea>
     <div v-if="toolHint" class="tool-hint">{{ toolHint }}</div>
   </div>
@@ -79,7 +82,9 @@ import {
 } from '@/services/canvas/pathBoolean'
 import type { CanvasObject, PathObject } from '@/stores/canvas'
 import { defaultGradient } from '@/services/canvas/gradient'
-import { cssFontFamily, DEFAULT_LINE_HEIGHT } from '@/services/canvas/textLayout'
+import { cssFontFamily, DEFAULT_LINE_HEIGHT, POINT_LEADING } from '@/services/canvas/textLayout'
+import { trackingPx } from '@/services/canvas/textStyle'
+import { clearLetterSelection, letterSelection, setLetterSelection } from '@/services/canvas/letterSelection'
 import { buildScene, snapEdges, snapMove, snapPoint, type SnapOptions, type SnapScene } from '@/services/canvas/snapEngine'
 import { snapSettings, SNAP_PX } from '@/services/canvas/snapSettings'
 import { sampleColorAt } from '@/services/canvas/colorSampler'
@@ -155,7 +160,6 @@ const inlineInput = ref<HTMLTextAreaElement | null>(null)
 const inlineEdit = ref<{ id: string; value: string; isNew: boolean } | null>(null)
 const inlineStyle = ref<Record<string, string>>({})
 // Point type renders multi-line text with svg.js's default leading.
-const POINT_LEADING = 1.3
 
 function computeInlineStyle(id: string) {
   const obj = store.getObject(id)
@@ -180,6 +184,7 @@ function computeInlineStyle(id: string) {
     lineHeight: String(leading),
     color: isNonePaint(color) ? '#211A43' : color,
     textAlign: obj.align || 'left',
+    letterSpacing: `${trackingPx(obj.tracking, fs)}px`,
   }
   const rot = obj.rotation || 0
   if (area) {
@@ -230,6 +235,15 @@ function startInlineEdit(id: string, isNew = false) {
     // Caret at the end, ready to keep typing.
     el.setSelectionRange(el.value.length, el.value.length)
   })
+}
+
+// Letters selected in the editor become the letter selection the panels
+// style (a collapsed caret clears it).
+function recordLetterSelection() {
+  const el = inlineInput.value
+  const edit = inlineEdit.value
+  if (!el || !edit) return
+  setLetterSelection(edit.id, el.selectionStart, el.selectionEnd)
 }
 
 function commitInlineEdit() {
@@ -1945,6 +1959,23 @@ watch(
 )
 
 watch(viewMode, (mode) => renderer?.setViewMode(mode))
+
+// Letter selection: tinted on the canvas while the editor is closed (the
+// editor shows its own selection), and dropped once its object isn't the
+// selection or its text no longer reaches the range.
+watch(
+  () => [letterSelection.id, letterSelection.start, letterSelection.end, inlineEdit.value?.id ?? null] as const,
+  ([id, start, end, editing]) => renderer?.setLetterHighlight(id && editing !== id ? { id, start, end } : null),
+)
+watch(
+  () => [store.selectedIds.join(','), letterSelection.id ? (store.getObject(letterSelection.id) as { text?: string } | null)?.text : undefined] as const,
+  ([ids, text]) => {
+    const id = letterSelection.id
+    // While editing, the range refers to the editor's (uncommitted) text.
+    if (!id || inlineEdit.value?.id === id) return
+    if (ids !== id || typeof text !== 'string' || letterSelection.end > text.length) clearLetterSelection()
+  },
+)
 
 // Any document change invalidates the cached snap scene.
 watch([objects, objectOrder, artboards, layers], () => (snapScene = null), { deep: true })

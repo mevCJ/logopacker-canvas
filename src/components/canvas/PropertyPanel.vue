@@ -168,7 +168,14 @@
       <template v-else-if="selected.type === 'text'">
         <section class="pp-section">
           <label class="pp-label">Text</label>
-          <textarea class="pp-textarea" :value="selected.text" @input="update({ text: val($event) })" />
+          <textarea
+            class="pp-textarea"
+            :value="selected.text"
+            @input="update({ text: val($event) })"
+            @select="pickLetters"
+            @keyup="pickLetters"
+            @mouseup="pickLetters"
+          />
         </section>
 
         <section class="pp-section">
@@ -186,6 +193,29 @@
             <select class="pp-select" :value="selected.fontWeight" @change="editText({ fontWeight: num($event) })">
               <option v-for="w in weightOptions(selected.fontFamily)" :key="w.value" :value="w.value">{{ w.label }}</option>
             </select>
+          </div>
+        </section>
+
+        <section class="pp-section">
+          <label class="pp-label">Tracking <span class="pp-value">1/1000 em</span></label>
+          <div class="pp-color-row">
+            <input
+              type="range"
+              min="-200"
+              max="1000"
+              step="10"
+              class="pp-range"
+              :value="selected.tracking || 0"
+              @pointerdown="store.snapshot('Tracking')"
+              @input="store.setTracking(selected.id, num($event))"
+            />
+            <input
+              type="number"
+              step="10"
+              class="pp-number pp-rot-num"
+              :value="selected.tracking || 0"
+              @change="store.snapshot('Tracking'); store.setTracking(selected.id, num($event))"
+            />
           </div>
         </section>
 
@@ -209,9 +239,21 @@
           <p v-if="opError" class="pp-error">{{ opError }}</p>
         </section>
 
+        <section v-if="letters" class="pp-section pp-letters">
+          <label class="pp-label">Selected letters <span class="pp-value pp-letters-text">“{{ letters.text }}”</span></label>
+          <ColorPicker :model-value="letters.fill" :swatches="docColors" @begin="store.snapshot('Letter color')" @update:model-value="setLetterFill" />
+          <label class="pp-label pp-sub">Letter spacing <span class="pp-value">1/1000 em</span></label>
+          <input type="number" step="10" class="pp-number" :value="letters.tracking" placeholder="Mixed" @change="setLetterTracking(num($event))" />
+          <div class="pp-row-2 pp-mt">
+            <button type="button" class="pp-ghost-btn" title="Remove these letters' own color and spacing" @click="resetLetters">Reset letters</button>
+            <button type="button" class="pp-ghost-btn" @click="clearLetterSelection()">Done</button>
+          </div>
+        </section>
+
         <section class="pp-section">
           <label class="pp-label">Color</label>
           <FillControl :target="selected" :swatches="docColors" />
+          <p v-if="!letters" class="pp-hint">To color or space single letters, select them in the text (double-click it on the canvas, or above).</p>
         </section>
 
         <section v-if="selected.pathD" class="pp-section">
@@ -303,6 +345,7 @@ import ColorPicker from './ColorPicker.vue'
 import FillControl from './FillControl.vue'
 import FontPicker from './FontPicker.vue'
 import StrokeStyleControl from './StrokeStyleControl.vue'
+import { clearLetterSelection, letterRangeFor, setLetterSelection } from '@/services/canvas/letterSelection'
 import { weightOptions } from '@/services/canvas/fontLibrary'
 import { createOutlines } from '@/services/canvas/textOutlines'
 import { applyPathfinder, type PathfinderOp } from '@/services/canvas/pathBoolean'
@@ -507,6 +550,48 @@ function setStrokeWidth(v: number) {
   if (!selected.value) return
   store.setStroke(selected.value.id, { strokeWidth: v })
 }
+// --- Letters ----------------------------------------------------------------
+// The letters picked in the text (canvas editor or the box above), with the
+// color and spacing they share ('' when they differ).
+const letters = computed(() => {
+  const o = selected.value
+  const range = letterRangeFor(o?.id)
+  if (!o || o.type !== 'text' || !range) return null
+  const fills = new Set<string>()
+  const tracks = new Set<number>()
+  for (let i = range.start; i < range.end; i++) {
+    const st = o.charStyles?.[i]
+    fills.add(st?.fill ?? (o.fillGradient ? '' : o.fill))
+    tracks.add(st?.tracking ?? o.tracking ?? 0)
+  }
+  return {
+    ...range,
+    text: (o.text || '').slice(range.start, range.end),
+    fill: fills.size === 1 ? [...fills][0]! : '',
+    tracking: tracks.size === 1 ? [...tracks][0]! : ('' as const),
+  }
+})
+function pickLetters(e: Event) {
+  const el = e.target as HTMLTextAreaElement
+  if (selected.value) setLetterSelection(selected.value.id, el.selectionStart, el.selectionEnd)
+}
+function setLetterFill(v: string) {
+  const l = letters.value
+  if (l && selected.value) store.setLetterStyle(selected.value.id, l.start, l.end, { fill: v })
+}
+function setLetterTracking(v: number) {
+  const l = letters.value
+  if (!l || !selected.value) return
+  store.snapshot('Letter spacing')
+  store.setLetterStyle(selected.value.id, l.start, l.end, { tracking: Math.round(v) })
+}
+function resetLetters() {
+  const l = letters.value
+  if (!l || !selected.value) return
+  store.snapshot('Reset letters')
+  store.clearLetterStyles(selected.value.id, l.start, l.end)
+}
+
 function setStrokeStyle(patch: { cap?: StrokeCap; join?: StrokeJoin }) {
   if (!selected.value) return
   store.snapshot('Stroke style')
@@ -702,6 +787,24 @@ function fitArtboardToArtwork() {
   font-size: 12px;
   color: #3f3f46;
   margin: 8px 0 2px;
+}
+.pp-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #a1a1aa;
+  line-height: 1.4;
+}
+.pp-letters {
+  padding: 10px;
+  border: 1px solid #c7d2fe;
+  border-radius: 10px;
+  background: #eef2ff;
+}
+.pp-letters-text {
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pp-error {
   margin-top: 8px;
