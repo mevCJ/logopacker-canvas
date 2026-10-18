@@ -563,9 +563,11 @@ function wireObject(obj: RenderObject, el: any) {
         else next.add(u)
       }
       store.selectObjects([...next])
-    } else if (!store.selectedIds.includes(obj.id)) {
-      // Clicking an already-selected object keeps the whole selection so the
-      // ensuing drag moves the group; only a fresh click collapses to one.
+    } else if (store.activeTool === 'node' || !store.selectedIds.includes(obj.id)) {
+      // Selection tool: clicking an already-selected object keeps the whole
+      // selection so the ensuing drag moves it all; only a fresh click
+      // collapses to one. Direct Selection always picks just what's clicked
+      // (e.g. one letter of outlined text).
       store.selectObjects(unit)
     }
   })

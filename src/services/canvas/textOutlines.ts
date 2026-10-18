@@ -8,8 +8,10 @@
 // alignment, wrapping in area type and placement along a path exactly as
 // drawn. Glyph shapes come from the real font file (opentype.js), placed at
 // those positions; the text element's transform then takes them to the
-// canvas. The result is one compound path per letter color (grouped when
-// letters have colors of their own), keeping the text's fill.
+// canvas. As in Illustrator, every letter becomes its own compound path
+// (holes included) and the letters of a word are grouped, so a letter can be
+// picked out with Direct Selection and recolored or reshaped on its own. Each
+// keeps its color: the letter's own, else the text's fill.
 import svgpath from 'svgpath'
 import type { CanvasStore, TextObject, AddObjectPayload } from '@/stores/canvas'
 import { fontFile, familyKey } from './fontLibrary'
@@ -39,22 +41,28 @@ async function loadFont(family: string, weight: number): Promise<OpenTypeFont | 
 
 export class MissingFontError extends Error {}
 
-// Path data (in the text element's local frame) for every visible glyph,
-// bucketed by letter color: `colorOf(i)` gives character i's own fill, or
-// null for the object's. Letters are read run by run (the renderer tags each
-// <tspan> run with where it starts in the text) so per-letter styles map back
-// to their characters; text without runs is read as one.
-export function glyphPathsByColor(
+export interface GlyphOutline {
+  char: string
+  index: number // into the text
+  color: string | null // the letter's own fill, or null for the text's
+  d: string // in the text element's local frame
+}
+
+// The outline of every visible letter. `colorOf(i)` gives character i's own
+// fill (null: the object's). Letters are read run by run (the renderer tags
+// each <tspan> run with where it starts in the text) so they map back to
+// their characters; text without runs is read as one.
+export function glyphOutlines(
   el: SVGTextElement,
   font: OpenTypeFont,
   fontSize: number,
   colorOf: (index: number) => string | null = () => null,
-): Map<string | null, string> {
+): GlyphOutline[] {
   const runs = [...el.querySelectorAll('tspan[data-start]')] as SVGTextContentElement[]
   const sources: { node: SVGTextContentElement; start: number }[] = runs.length
     ? runs.map((node) => ({ node, start: Number(node.getAttribute('data-start')) || 0 }))
     : [{ node: el, start: 0 }]
-  const parts = new Map<string | null, string[]>()
+  const out: GlyphOutline[] = []
   for (const { node, start } of sources) {
     const content = node.textContent ?? ''
     // The DOM indexes characters by UTF-16 unit; astral characters span two.
@@ -79,12 +87,10 @@ export function glyphPathsByColor(
       if (!d) continue
       let sp = svgpath(d)
       if (rot) sp = sp.rotate(rot, 0, 0)
-      const color = colorOf(start + idx)
-      if (!parts.has(color)) parts.set(color, [])
-      parts.get(color)!.push(sp.translate(pos.x, pos.y).toString())
+      out.push({ char: ch, index: start + idx, color: colorOf(start + idx), d: sp.translate(pos.x, pos.y).toString() })
     }
   }
-  return new Map([...parts].map(([c, ps]) => [c, ps.join(' ')]))
+  return out
 }
 
 // Convert text objects to paths in place. Returns the new path ids. Throws
@@ -106,15 +112,13 @@ export async function createOutlines(store: CanvasStore, ids: string[]): Promise
       missing.add(familyKey(t.fontFamily))
       continue
     }
-    // One compound path per letter color: the object's own color, plus one
-    // for each color given to individual letters.
-    const byColor = glyphPathsByColor(el, font, t.fontSize || 24, (i) => t.charStyles?.[i]?.fill ?? null)
+    // One compound path per letter, in the letter's color.
+    const glyphs = glyphOutlines(el, font, t.fontSize || 24, (i) => t.charStyles?.[i]?.fill ?? null)
     const ab = t.artboardId ? store.getArtboard(t.artboardId) : null
     const transform = el.getAttribute('transform')
     const baseName = `${(t.name || t.text).trim().slice(0, 40)} (outlines)`
     const payloads: AddObjectPayload[] = []
-    for (const [color, local] of byColor) {
-      if (!local) continue
+    for (const { char, color, d: local } of glyphs) {
       // Through the element's own transform (translate + rotation) to canvas
       // space, then into the artboard's frame.
       let sp = svgpath(local)
@@ -142,14 +146,19 @@ export async function createOutlines(store: CanvasStore, ids: string[]): Promise
         semanticRole: t.semanticRole,
         artboardId: t.artboardId,
         layerId: t.layerId,
-        groupId: t.groupId,
-        name: color === null ? baseName : `${baseName} ${color}`,
+        name: char,
       })
     }
     if (!payloads.length) continue
+    const parentGroup = t.groupId
     const ids = replaceObjects(store, [t.id], payloads)
-    // Several colors: keep the word together as a group.
-    if (ids.length > 1) store.groupObjects(ids, baseName)
+    // The letters of a word stay together as a group, inside the text's own
+    // group if it had one.
+    const gid = ids.length > 1 ? store.groupObjects(ids, baseName) : null
+    if (parentGroup && store.groups[parentGroup]) {
+      if (gid) store.groups[gid]!.parentId = parentGroup
+      else for (const id of ids) store.updateObject(id, { groupId: parentGroup })
+    }
     created.push(...ids)
   }
   if (missing.size && !created.length) {
