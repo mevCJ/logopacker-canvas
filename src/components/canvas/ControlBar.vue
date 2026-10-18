@@ -243,6 +243,8 @@ function onDocDown(e: MouseEvent) {
   pop.value = null
 }
 watch(() => store.selectedIds.join(',') + (store.selectedArtboardId ?? ''), () => (pop.value = null))
+// Switching tools dismisses an open Fill/Stroke popover.
+watch(() => store.activeTool, () => (pop.value = null))
 onMounted(() => document.addEventListener('mousedown', onDocDown))
 onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown))
 

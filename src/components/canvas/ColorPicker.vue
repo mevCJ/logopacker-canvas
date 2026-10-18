@@ -86,6 +86,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { registerCanvasPick } from '@/services/canvas/canvasPick'
+import { useCanvasStore } from '@/stores/canvas'
 import { formatColor, hsvToRgb, isNonePaint, parseColor, rgbToHsv, toHex, type Hsv } from '@/services/canvas/color'
 
 const props = withDefaults(
@@ -142,6 +143,17 @@ watch(
   { immediate: true },
 )
 onBeforeUnmount(() => unregisterPick?.())
+
+// Switching tools (sidebar click or hotkey) dismisses a picker the user
+// toggled open. Pickers that are always open (inside a popover or the
+// gradient editor) are left to their host.
+const store = useCanvasStore()
+watch(
+  () => store.activeTool,
+  () => {
+    if (!props.defaultOpen) open.value = false
+  },
+)
 
 const isNone = computed(() => props.modelValue !== '' && isNonePaint(props.modelValue))
 
